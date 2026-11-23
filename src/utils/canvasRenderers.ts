@@ -7,6 +7,7 @@ import type {
 } from '../data/munitions';
 import type { RussianAircraftId, RussianAircraftSpec } from '../data/airfields';
 import {
+  drawNavalMissileShipTopDown,
   drawRealisticLauncherChassis,
   drawRealisticPvoTopDown,
   getAircraftSpriteCanvas,
@@ -119,6 +120,7 @@ export function drawLauncher(
     reloadingProgress?: number;
     ammo?: number;
     maxAmmo?: number;
+    isNavalShip?: boolean;
     timeSec: number;
   },
 ) {
@@ -131,6 +133,7 @@ export function drawLauncher(
     reloadingProgress = 1,
     ammo = spec.maxAmmo,
     maxAmmo = spec.maxAmmo,
+    isNavalShip = false,
     timeSec,
   } = options;
 
@@ -181,19 +184,43 @@ export function drawLauncher(
   ctx.save();
   ctx.rotate(aimAngleRad);
 
-  // Soft ground shadow underneath realistic launcher truck / platform
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
-  ctx.beginPath();
-  ctx.roundRect(-21, -11, 44, 24, 4);
-  ctx.fill();
+  if (isNavalShip) {
+    // Subtle ocean bow wake & stern foam trail around naval frigate
+    const wakePulse = 0.85 + Math.sin(timeSec * 3.2) * 0.15;
+    ctx.strokeStyle = `rgba(186, 230, 253, ${0.26 * wakePulse})`;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(23, 0);
+    ctx.quadraticCurveTo(4, -10.5, -28, -11.5);
+    ctx.moveTo(23, 0);
+    ctx.quadraticCurveTo(4, 10.5, -28, 11.5);
+    ctx.stroke();
 
-  drawRealisticLauncherChassis(
-    ctx,
-    spec.id,
-    spec.faction,
-    ammo,
-    reloadingProgress >= 0.99,
-  );
+    ctx.fillStyle = 'rgba(224, 242, 254, 0.18)';
+    ctx.beginPath();
+    ctx.moveTo(-22, -3.5);
+    ctx.lineTo(-34 * wakePulse, -6);
+    ctx.lineTo(-34 * wakePulse, 6);
+    ctx.lineTo(-22, 3.5);
+    ctx.closePath();
+    ctx.fill();
+
+    drawNavalMissileShipTopDown(ctx, ammo, maxAmmo);
+  } else {
+    // Soft ground shadow underneath realistic launcher truck / platform
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
+    ctx.beginPath();
+    ctx.roundRect(-21, -11, 44, 24, 4);
+    ctx.fill();
+
+    drawRealisticLauncherChassis(
+      ctx,
+      spec.id,
+      spec.faction,
+      ammo,
+      reloadingProgress >= 0.99,
+    );
+  }
 
   ctx.restore();
 
@@ -243,7 +270,9 @@ export function drawLauncher(
 
     // Show compact name label only when selected or hovered so map stays clean
     if (selected || hovered) {
-      const label = `${spec.shortName} · ${ammo}/${maxAmmo}`;
+      const label = isNavalShip
+        ? `Корабль ВМФ · Калибр ${ammo}/${maxAmmo}`
+        : `${spec.shortName} · ${ammo}/${maxAmmo}`;
       ctx.font = '600 9.5px "JetBrains Mono", monospace';
       const lw = ctx.measureText(label).width + 10;
       ctx.fillStyle = 'rgba(7, 13, 23, 0.9)';
@@ -1114,9 +1143,13 @@ function drawMunitionSilhouettePath(
     return;
   }
 
-  // Cruise & jet missile-drones: kalibr, kh101, kh69, neptune, palyanytsya, peklo, flamingo
+  // Cruise & jet missile-drones: kalibr, banderol, kh101, kh69, neptune, palyanytsya, peklo, flamingo
   const wingSpan =
-    id === 'kh101' || id === 'flamingo' ? 16.5 : id === 'palyanytsya' ? 12 : 13;
+    id === 'kh101' || id === 'flamingo'
+      ? 16.5
+      : id === 'palyanytsya' || id === 'banderol'
+        ? 11.5
+        : 13;
   if (shadowOnly) {
     ctx.fillRect(-13, -2.0, 28, 4.0);
     ctx.beginPath();
@@ -2774,13 +2807,103 @@ function drawCarrierAircraftSilhouette(
     return;
   }
 
+  if (id === 'su24m' || id === 'mig29ua' || id === 'f16am') {
+    if (shadowOnly) {
+      ctx.beginPath();
+      ctx.moveTo(21, 0);
+      ctx.lineTo(7, -3);
+      ctx.lineTo(-8, -16);
+      ctx.lineTo(-13, -14);
+      ctx.lineTo(-5, -3);
+      ctx.lineTo(-15, -3);
+      ctx.lineTo(-18.5, -8);
+      ctx.lineTo(-19.5, -6);
+      ctx.lineTo(-16, 0);
+      ctx.lineTo(-19.5, 6);
+      ctx.lineTo(-18.5, 8);
+      ctx.lineTo(-15, 3);
+      ctx.lineTo(-5, 3);
+      ctx.lineTo(-13, 14);
+      ctx.lineTo(-8, 16);
+      ctx.lineTo(7, 3);
+      ctx.closePath();
+      ctx.fill();
+      return;
+    }
+
+    const wingGrad = ctx.createLinearGradient(0, -16, 0, 16);
+    wingGrad.addColorStop(0, '#6F7D8C');
+    wingGrad.addColorStop(0.5, '#546170');
+    wingGrad.addColorStop(1, '#343D48');
+    ctx.fillStyle = wingGrad;
+    ctx.strokeStyle = 'rgba(15, 20, 26, 0.75)';
+    ctx.lineWidth = 0.65;
+    ctx.beginPath();
+    ctx.moveTo(7, -2.4);
+    ctx.lineTo(-8, -16);
+    ctx.lineTo(-13, -14);
+    ctx.lineTo(-4, -2.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(7, 2.4);
+    ctx.lineTo(-8, 16);
+    ctx.lineTo(-13, 14);
+    ctx.lineTo(-4, 2.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#3C4652';
+    ctx.beginPath();
+    ctx.moveTo(-12, -2.3);
+    ctx.lineTo(-18, -8);
+    ctx.lineTo(-19.5, -6);
+    ctx.lineTo(-15, -2.3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-12, 2.3);
+    ctx.lineTo(-18, 8);
+    ctx.lineTo(-19.5, 6);
+    ctx.lineTo(-15, 2.3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#586675';
+    ctx.beginPath();
+    ctx.moveTo(21, 0);
+    ctx.quadraticCurveTo(14, -2.8, 9.5, -2.8);
+    ctx.lineTo(-15, -3.0);
+    ctx.lineTo(-15, 3.0);
+    ctx.lineTo(9.5, 2.8);
+    ctx.quadraticCurveTo(14, 2.8, 21, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#2563EB';
+    ctx.fillRect(-13, -1.6, 2.8, 1.6);
+    ctx.fillStyle = '#FACC15';
+    ctx.fillRect(-13, 0, 2.8, 1.6);
+
+    ctx.fillStyle = '#181E25';
+    ctx.beginPath();
+    ctx.ellipse(11.5, 0, 3.6, 1.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
   // su57-x69 uses su57-kab silhouette
   drawMunitionSilhouettePath(ctx, 'su57-kab', shadowOnly);
 }
 
 /**
- * Draws a flying Russian strategic/tactical missile-carrying aircraft
- * from a placed Russian airfield with realistic shadow and subtle jet exhaust.
+ * Draws a flying strategic/tactical missile-carrying aircraft
+ * from a placed airfield with realistic shadow and subtle jet exhaust.
  */
 export function drawFlyingCarrierAircraft(
   ctx: CanvasRenderingContext2D,
@@ -2796,7 +2919,7 @@ export function drawFlyingCarrierAircraft(
   const baseScale =
     aircraftSpec.id === 'tu95' || aircraftSpec.id === 'tu160'
       ? 1.15
-      : aircraftSpec.id === 'tu22m3'
+      : aircraftSpec.id === 'tu22m3' || aircraftSpec.id === 'su24m'
         ? 1.1
         : 1.06;
   const scale = baseScale + arcFactor * 0.12;
@@ -2820,7 +2943,8 @@ export function drawFlyingCarrierAircraft(
   if (aircraftSpec.id !== 'tu95') {
     const flicker = 0.86 + Math.sin(timeSec * 44) * 0.14;
     const flameLen = (aircraftSpec.id === 'mig31k' || aircraftSpec.id === 'tu160' ? 11.5 : 9.5) * flicker;
-    for (const ey of [-2.1, 2.1]) {
+    const exhaustYs = aircraftSpec.id === 'f16am' ? [0] : [-2.1, 2.1];
+    for (const ey of exhaustYs) {
       const grad = ctx.createLinearGradient(-15, ey, -15 - flameLen, ey);
       grad.addColorStop(0, 'rgba(255, 245, 225, 0.92)');
       grad.addColorStop(0.45, 'rgba(251, 146, 60, 0.55)');
@@ -2845,7 +2969,7 @@ export function drawFlyingCarrierAircraft(
 }
 
 /**
- * Draws a Russian military airbase / airfield on the satellite map with
+ * Draws a military airbase / airfield on the satellite map with
  * runway markings, parked aircraft silhouette, rotating tower radar, and active loadout badge.
  */
 export function drawAirfield(
@@ -2854,6 +2978,7 @@ export function drawAirfield(
   y: number,
   options: {
     name: string;
+    faction?: 'RU' | 'UA';
     aircraftId: RussianAircraftId;
     aircraftShortName: string;
     missileShortName: string;
@@ -2868,6 +2993,7 @@ export function drawAirfield(
 ) {
   const {
     name,
+    faction = 'RU',
     aircraftShortName,
     missileShortName,
     salvoCount,
@@ -2878,6 +3004,7 @@ export function drawAirfield(
     previewValid = true,
     timeSec,
   } = options;
+  const isUa = faction === 'UA';
 
   ctx.save();
   ctx.translate(x, y);
@@ -2933,7 +3060,7 @@ export function drawAirfield(
     ctx.save();
     ctx.translate(15, -17);
     ctx.rotate(timeSec * 3.5);
-    ctx.strokeStyle = '#F97316';
+    ctx.strokeStyle = isUa ? '#38BDF8' : '#F97316';
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(-3.2, 0);
@@ -2955,13 +3082,18 @@ export function drawAirfield(
 
   if (!isPreview) {
     ctx.globalAlpha = 1;
-    const badgeText = `АЭР ${name} · ${aircraftShortName} (${salvoCount}× ${missileShortName})`;
+    const prefix = isUa ? 'АЭР ВСУ' : 'АЭР';
+    const badgeText = `${prefix} ${name} · ${aircraftShortName} (${salvoCount}× ${missileShortName})`;
     ctx.font = '700 10px "JetBrains Mono", monospace';
     const bw = ctx.measureText(badgeText).width + 12;
     const bx = -bw / 2;
     const by = 24;
     ctx.fillStyle = 'rgba(7, 13, 23, 0.92)';
-    ctx.strokeStyle = selected ? accentColor : 'rgba(249, 115, 22, 0.6)';
+    ctx.strokeStyle = selected
+      ? accentColor
+      : isUa
+        ? 'rgba(56, 189, 248, 0.65)'
+        : 'rgba(249, 115, 22, 0.6)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.roundRect(bx, by, bw, 16, 3.5);

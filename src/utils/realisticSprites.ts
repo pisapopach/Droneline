@@ -13,6 +13,7 @@ const aircraftUrlCache: Partial<Record<RussianAircraftId, string>> = {};
 
 const launcherUrlCache: Partial<Record<MunitionId, string>> = {};
 const pvoUrlCache: Partial<Record<AirDefenseId, string>> = {};
+let shipUrlCache: string | null = null;
 
 let cachedNoisePattern: CanvasPattern | null | undefined = undefined;
 
@@ -1496,6 +1497,19 @@ function bakeMunitionSprite(id: MunitionId): HTMLCanvasElement {
       wingSweep: 11,
       hasDorsalPod: true,
     });
+  } else if (id === 'banderol') {
+    paintCylindricalMissile(ctx, -25, 27, 2.8, 8.2, {
+      top: '#CBD5E1',
+      mid: '#64748B',
+      dark: '#2A313C',
+      nose: '#1E242C',
+      wing: '#94A3B8',
+      hasMidWings: true,
+      wingSpan: 19,
+      wingSweep: 13,
+      hasDorsalPod: true,
+      bandColor: '#FB7185',
+    });
   } else if (id === 'kalibr') {
     paintCylindricalMissile(ctx, -29, 30, 3.3, 9.5, {
       top: '#EEF2F6',
@@ -1600,6 +1614,30 @@ function bakeMunitionSprite(id: MunitionId): HTMLCanvasElement {
       wingSpan: 24,
       wingSweep: 11,
     });
+  } else if (id === 'storm-shadow') {
+    paintCylindricalMissile(ctx, -29, 30, 3.8, 10, {
+      top: '#A5B1BE',
+      mid: '#6B7785',
+      dark: '#313942',
+      nose: '#252C34',
+      wing: '#8C97A4',
+      hasMidWings: true,
+      wingSpan: 24,
+      wingSweep: 15,
+      bandColor: '#38BDF8',
+    });
+  } else if (id === 'aasm-hammer') {
+    paintCylindricalMissile(ctx, -25, 26, 4.1, 10, {
+      top: '#94A3B8',
+      mid: '#5B6876',
+      dark: '#2B333D',
+      nose: '#1E252D',
+      wing: '#CBD5E1',
+      hasMidWings: true,
+      wingSpan: 20,
+      wingSweep: 9,
+      bandColor: '#60A5FA',
+    });
   } else if (id === 'airstrike' || id === 'su57-kab') {
     drawJetFighterTopDown(ctx, id === 'su57-kab' ? 'su57' : 'su34');
   }
@@ -1610,7 +1648,7 @@ function bakeMunitionSprite(id: MunitionId): HTMLCanvasElement {
 
 function drawJetFighterTopDown(
   ctx: CanvasRenderingContext2D,
-  variant: 'su57' | 'su34' | 'mig31' | 'tu22' | 'tu95' | 'tu160',
+  variant: 'su57' | 'su34' | 'mig31' | 'tu22' | 'tu95' | 'tu160' | 'su24m' | 'mig29ua' | 'f16am',
 ) {
   if (variant === 'su57' || variant === 'su34') {
     const isStealth = variant === 'su57';
@@ -1846,6 +1884,165 @@ function drawJetFighterTopDown(
     return;
   }
 
+  if (variant === 'su24m') {
+    // Variable-geometry Su-24M Fencer (grey-white belly / pixel air-superiority top)
+    const g = ctx.createLinearGradient(0, -21, 0, 21);
+    g.addColorStop(0, '#9DA8B4');
+    g.addColorStop(0.5, '#687482');
+    g.addColorStop(1, '#363F4B');
+    ctx.fillStyle = g;
+    ctx.strokeStyle = 'rgba(12, 16, 22, 0.85)';
+    ctx.lineWidth = 0.7;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(9, s * 3.2);
+      ctx.lineTo(-9, s * 20.5);
+      ctx.lineTo(-14.5, s * 17.5);
+      ctx.lineTo(-4, s * 3.2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(-13, s * 3.0);
+      ctx.lineTo(-21, s * 9.5);
+      ctx.lineTo(-23, s * 7.2);
+      ctx.lineTo(-18, s * 3.0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(27, 0);
+    ctx.lineTo(13, -3.9);
+    ctx.lineTo(-19, -4.3);
+    ctx.lineTo(-19, 4.3);
+    ctx.lineTo(13, 3.9);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    // UA pixel blue/yellow tail flash
+    ctx.fillStyle = '#2563EB';
+    ctx.fillRect(-16, -2.1, 4, 2.1);
+    ctx.fillStyle = '#FACC15';
+    ctx.fillRect(-16, 0, 4, 2.1);
+    ctx.fillStyle = '#181E26';
+    ctx.beginPath();
+    ctx.ellipse(14.5, 0, 4.8, 1.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
+  if (variant === 'mig29ua') {
+    // Ukrainian Air Force MiG-29 Fulcrum (digital grey-blue pixel camo)
+    const g = ctx.createLinearGradient(0, -19, 0, 19);
+    g.addColorStop(0, '#96A6B8');
+    g.addColorStop(0.5, '#5D6E80');
+    g.addColorStop(1, '#313C49');
+    ctx.fillStyle = g;
+    ctx.strokeStyle = 'rgba(12, 16, 22, 0.85)';
+    ctx.lineWidth = 0.7;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(13, s * 2.5);
+      ctx.lineTo(5, s * 7.2);
+      ctx.lineTo(-9, s * 18.5);
+      ctx.lineTo(-14.5, s * 15.2);
+      ctx.lineTo(-6, s * 4.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(-12, s * 4.0);
+      ctx.lineTo(-20.5, s * 10.8);
+      ctx.lineTo(-22.8, s * 8.4);
+      ctx.lineTo(-16.5, s * 4.0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    for (const ey of [-3.0, 3.0]) {
+      ctx.fillStyle = '#475569';
+      ctx.fillRect(-21, ey - 1.6, 10, 3.2);
+    }
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(27, 0);
+    ctx.lineTo(13, -3.5);
+    ctx.lineTo(-18, -4.5);
+    ctx.lineTo(-18, 4.5);
+    ctx.lineTo(13, 3.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#2563EB';
+    ctx.fillRect(-14, -2.0, 3.5, 2.0);
+    ctx.fillStyle = '#FACC15';
+    ctx.fillRect(-14, 0, 3.5, 2.0);
+    ctx.fillStyle = '#181E26';
+    ctx.beginPath();
+    ctx.ellipse(14.2, 0, 5.0, 1.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
+  if (variant === 'f16am') {
+    // F-16AM Fighting Falcon (single-engine cropped delta + Have Glass V grey)
+    const g = ctx.createLinearGradient(0, -18, 0, 18);
+    g.addColorStop(0, '#9AA3AE');
+    g.addColorStop(0.5, '#68717D');
+    g.addColorStop(1, '#3B424D');
+    ctx.fillStyle = g;
+    ctx.strokeStyle = 'rgba(12, 16, 22, 0.85)';
+    ctx.lineWidth = 0.7;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(10, s * 2.2);
+      ctx.lineTo(4, s * 5.2);
+      ctx.lineTo(-7, s * 17.5);
+      ctx.lineTo(-12.5, s * 17.5);
+      ctx.lineTo(-9, s * 3.0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(-12, s * 2.4);
+      ctx.lineTo(-19.5, s * 9.2);
+      ctx.lineTo(-22, s * 7.2);
+      ctx.lineTo(-17, s * 2.4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(27, 0);
+    ctx.quadraticCurveTo(18, -3.2, 10, -2.8);
+    ctx.lineTo(-20, -2.8);
+    ctx.lineTo(-20, 2.8);
+    ctx.lineTo(10, 2.8);
+    ctx.quadraticCurveTo(18, 3.2, 27, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#2563EB';
+    ctx.fillRect(-16, -1.8, 3.2, 1.8);
+    ctx.fillStyle = '#FACC15';
+    ctx.fillRect(-16, 0, 3.2, 1.8);
+    ctx.fillStyle = '#181E26';
+    ctx.beginPath();
+    ctx.ellipse(13.5, 0, 5.4, 1.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(250, 204, 21, 0.35)';
+    ctx.beginPath();
+    ctx.ellipse(14.5, -0.35, 2.8, 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
   // tu160 "White Swan"
   const wg = ctx.createLinearGradient(0, -25, 0, 25);
   wg.addColorStop(0, '#F8FAFC');
@@ -1898,12 +2095,18 @@ function bakeAircraftSprite(id: RussianAircraftId): HTMLCanvasElement {
   ctx.save();
   ctx.translate(W / 2, H / 2);
   ctx.scale(2.2, 2.2);
-  const map: Record<RussianAircraftId, 'mig31' | 'tu95' | 'tu22' | 'tu160' | 'su57'> = {
+  const map: Record<
+    RussianAircraftId,
+    'mig31' | 'tu95' | 'tu22' | 'tu160' | 'su57' | 'su24m' | 'mig29ua' | 'f16am'
+  > = {
     mig31k: 'mig31',
     tu95: 'tu95',
     tu22m3: 'tu22',
     tu160: 'tu160',
     'su57-x69': 'su57',
+    su24m: 'su24m',
+    mig29ua: 'mig29ua',
+    f16am: 'f16am',
   };
   drawJetFighterTopDown(ctx, map[id]);
   ctx.restore();
@@ -2318,6 +2521,134 @@ export function drawRealisticLauncherChassis(
       cellIdx++;
     }
   }
+}
+
+export function drawNavalMissileShipTopDown(
+  ctx: CanvasRenderingContext2D,
+  ammo: number,
+  maxAmmo = 8,
+) {
+  const rim = 'rgba(10, 14, 22, 0.92)';
+
+  // Sleek naval corvette / frigate hull (Project 22800 / 11356 top-down)
+  const hullGrad = ctx.createLinearGradient(0, -7.2, 0, 7.2);
+  hullGrad.addColorStop(0, '#788492');
+  hullGrad.addColorStop(0.5, '#596573');
+  hullGrad.addColorStop(1, '#39434E');
+  ctx.fillStyle = hullGrad;
+  ctx.strokeStyle = rim;
+  ctx.lineWidth = 0.9;
+  ctx.beginPath();
+  ctx.moveTo(24.5, 0);
+  ctx.quadraticCurveTo(17, -6.2, 6, -6.8);
+  ctx.lineTo(-20.5, -5.8);
+  ctx.lineTo(-22.5, -4.2);
+  ctx.lineTo(-22.5, 4.2);
+  ctx.lineTo(-20.5, 5.8);
+  ctx.lineTo(6, 6.8);
+  ctx.quadraticCurveTo(17, 6.2, 24.5, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Inner weather deck outline
+  ctx.fillStyle = '#47525E';
+  ctx.beginPath();
+  ctx.moveTo(21, 0);
+  ctx.quadraticCurveTo(14.5, -4.8, 5, -5.2);
+  ctx.lineTo(-19, -4.5);
+  ctx.lineTo(-19, 4.5);
+  ctx.lineTo(5, 5.2);
+  ctx.quadraticCurveTo(14.5, 4.8, 21, 0);
+  ctx.closePath();
+  ctx.fill();
+
+  // Forward 57mm/100mm stealth deck turret
+  ctx.fillStyle = '#717D8A';
+  ctx.strokeStyle = rim;
+  ctx.lineWidth = 0.65;
+  ctx.beginPath();
+  ctx.moveTo(15.5, 0);
+  ctx.lineTo(12.2, -2.0);
+  ctx.lineTo(10.6, 0);
+  ctx.lineTo(12.2, 2.0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = '#9AA6B2';
+  ctx.lineWidth = 1.1;
+  ctx.beginPath();
+  ctx.moveTo(14.6, 0);
+  ctx.lineTo(18.8, 0);
+  ctx.stroke();
+
+  // 8-cell UKSK Kalibr VLS battery ahead of bridge (4x2 vertical launch hatches)
+  ctx.fillStyle = '#2A323B';
+  ctx.strokeStyle = '#181E26';
+  ctx.lineWidth = 0.6;
+  ctx.fillRect(1.8, -3.5, 7.6, 7.0);
+  ctx.strokeRect(1.8, -3.5, 7.6, 7.0);
+
+  const visibleCells = Math.min(8, Math.max(1, maxAmmo));
+  let idx = 0;
+  for (const cx of [2.5, 4.3, 6.1, 7.9]) {
+    for (const cy of [-2.7, 0.5]) {
+      if (idx >= visibleCells) break;
+      const loaded = idx < ammo;
+      ctx.fillStyle = loaded ? '#8895A3' : '#0B0F14';
+      ctx.fillRect(cx, cy, 1.3, 2.2);
+      idx++;
+    }
+  }
+
+  // Stealth angular bridge & radar superstructure
+  ctx.fillStyle = '#687482';
+  ctx.strokeStyle = rim;
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.roundRect(-8.8, -4.1, 9.6, 8.2, 1.2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Bridge visor windows
+  ctx.fillStyle = '#121A24';
+  ctx.fillRect(-0.5, -3.2, 1.2, 6.4);
+
+  // Twin exhaust stacks & radar dome
+  ctx.fillStyle = '#333C46';
+  ctx.beginPath();
+  ctx.arc(-4.2, 0, 1.9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#1C222A';
+  ctx.fillRect(-8.2, -2.6, 2.2, 1.8);
+  ctx.fillRect(-8.2, 0.8, 2.2, 1.8);
+
+  // Aft helipad deck with crisp landing ring
+  ctx.fillStyle = '#3A434D';
+  ctx.fillRect(-18.5, -3.8, 8.2, 7.6);
+  ctx.strokeStyle = 'rgba(226, 232, 240, 0.65)';
+  ctx.lineWidth = 0.65;
+  ctx.beginPath();
+  ctx.arc(-14.4, 0, 2.6, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+export function getShipSpriteDataUrl(): string {
+  if (shipUrlCache) return shipUrlCache;
+  if (typeof document === 'undefined') return '';
+  const W = 220;
+  const H = 150;
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext('2d')!;
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(3.7, 3.7);
+  drawNavalMissileShipTopDown(ctx, 8, 8);
+  ctx.restore();
+  shipUrlCache = c.toDataURL('image/png');
+  return shipUrlCache;
 }
 
 export function getLauncherSpriteDataUrl(id: MunitionId): string {

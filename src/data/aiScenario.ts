@@ -9,8 +9,21 @@ import {
   type BuildingId,
   type MunitionId,
 } from './munitions';
-import { computeBearingDeg, isFlightPathAllowed } from '../utils/geoBoundaries';
+import {
+  computeBearingDeg,
+  haversineDistanceKm,
+  isBlackOrAzovSeaPoint,
+  isFlightPathAllowed,
+} from '../utils/geoBoundaries';
 import { isFactionPlacementAllowed } from '../utils/frontline2026';
+
+export type AiWaveType = 'daily' | 'medium_massive' | 'massive';
+
+export interface AiDirectorOptions {
+  currentDay: number;
+  waveType: AiWaveType;
+  forceDailyKab: boolean;
+}
 
 export interface InitialBuildingTemplate {
   id: string;
@@ -35,6 +48,7 @@ export interface AiLauncherSpawn {
   ammo: number;
   headingDeg: number;
   originName: string;
+  isNavalShip?: boolean;
 }
 
 export interface AiWaveStrikeOrder {
@@ -93,6 +107,19 @@ export const AI_LAUNCH_ORIGINS: AiLaunchOrigin[] = [
   { id: 'melitopol', name: 'Мелитополь', lat: 46.8489, lng: 35.3653 },
   { id: 'bryansk', name: 'Брянск', lat: 53.2435, lng: 34.3634 },
   { id: 'primorsko', name: 'Приморско-Ахтарск', lat: 46.08, lng: 38.22 },
+];
+
+const AI_KAB_FRONTLINE_ORIGINS: AiLaunchOrigin[] = [
+  { id: 'kab_belgorod', name: 'Белгородское напр.', lat: 50.45, lng: 36.75 },
+  { id: 'kab_tokmak', name: 'Запорожское напр.', lat: 47.34, lng: 35.58 },
+  { id: 'kab_donetsk', name: 'Донецкое напр.', lat: 47.92, lng: 37.68 },
+  { id: 'kab_sumy_border', name: 'Сумское приграничье', lat: 51.25, lng: 35.15 },
+];
+
+const AI_BLACK_SEA_SHIP_SPOTS: AiLaunchOrigin[] = [
+  { id: 'ship_novoross', name: 'Чёрное море (Новороссийск)', lat: 44.28, lng: 37.18 },
+  { id: 'ship_crimea_s', name: 'Чёрное море (ЮБК)', lat: 43.92, lng: 34.25 },
+  { id: 'ship_crimea_w', name: 'Чёрное море (акватория)', lat: 44.32, lng: 32.25 },
 ];
 
 const AI_STANDOFF_LAUNCH_POINTS: Record<
@@ -175,6 +202,7 @@ export function createInitialAiAirfields() {
       lat: preset.lat,
       lng: preset.lng,
       selectedAircraftId: preset.defaultAircraftId,
+      availableAircraftIds: preset.availableAircraftIds,
       salvoCount: Math.min(2, acSpec.missileCount),
       isAi: true,
     };
@@ -192,30 +220,77 @@ function jitterLauncherCoords(origin: AiLaunchOrigin): { lat: number; lng: numbe
   return { lat: origin.lat, lng: origin.lng };
 }
 
+function jitterSeaShipCoords(): { originName: string; lat: number; lng: number } | null {
+  const spots = [...AI_BLACK_SEA_SHIP_SPOTS].sort(() => Math.random() - 0.5);
+  for (const spot of spots) {
+    for (let i = 0; i < 6; i++) {
+      const lat = spot.lat + (Math.random() - 0.5) * 0.35;
+      const lng = spot.lng + (Math.random() - 0.5) * 0.5;
+      if (isBlackOrAzovSeaPoint(lat, lng)) {
+        return { originName: spot.name, lat, lng };
+      }
+    }
+    if (isBlackOrAzovSeaPoint(spot.lat, spot.lng)) {
+      return { originName: spot.name, lat: spot.lat, lng: spot.lng };
+    }
+  }
+  return null;
+}
+
+function randomShahedAltitude(): {
+  altitudeMode: AltitudeMode;
+  climbAtProgress?: number;
+  postClimbAltitudeMode?: AltitudeMode;
+} {
+  const r = Math.random();
+  const altMode: AltitudeMode = r < 0.36 ? 'ultra-low' : r < 0.78 ? 'low' : 'normal';
+  const willClimb = altMode === 'ultra-low' && Math.random() < 0.85;
+  return {
+    altitudeMode: altMode,
+    climbAtProgress: willClimb ? 0.42 + Math.random() * 0.32 : undefined,
+    postClimbAltitudeMode: willClimb ? (Math.random() < 0.72 ? 'normal' : 'low') : undefined,
+  };
+}
+
 /**
- * Generates moderate, realistic AI attack waves ("не много и не часто"):
- * - Deploys real Russian/occupied ground launchers first (~2.8s before launch),
- *   then launches drones/missiles out of those launchers.
- * - Rarely (every 3rd wave starting wave 3) launches a real strategic/tactical aircraft
- *   sortie from one of the pre-placed Russian airbases.
+ * AI Director:
+ * - 'daily': starts with few Shaheds (1-2 early -> scales up gently over time) + daily frontline КАБ when due.
+ *   NEVER launches cruise/ballistic missiles on normal days.
+ * - 'medium_massive': 3-5 Shaheds + Black Sea Kalibr ship + S-8000 Banderol / Iskander + tactical sortie.
+ * - 'massive' (max once per 3-5 game weeks = 21-35 game days): 6-8 Shaheds + Black Sea Kalibr ship +
+ *   S-8000 Banderol + Iskander-M + strategic Kh-101 / Kinzhal airfield sorties.
  */
 export function generateAiWaveOrders(
   waveNumber: number,
   buildings: Array<{ id: string; lat: number; lng: number }>,
   pvoUnits: Array<{ id: string; lat: number; lng: number; isRadar?: boolean }>,
+  options: AiDirectorOptions = { currentDay: 1, waveType: 'daily', forceDailyKab: waveNumber === 1 },
 ): {
   launchers: AiLauncherSpawn[];
   orders: AiWaveStrikeOrder[];
   airfieldSorties: AiAirfieldSortieOrder[];
   nextIntervalSec: number;
+  waveType: AiWaveType;
+  spawnedKab: boolean;
 } {
   if (buildings.length === 0) {
-    return { launchers: [], orders: [], airfieldSorties: [], nextIntervalSec: 22 };
+    return {
+      launchers: [],
+      orders: [],
+      airfieldSorties: [],
+      nextIntervalSec: 22,
+      waveType: options.waveType,
+      spawnedKab: false,
+    };
   }
 
+  const { waveType, currentDay, forceDailyKab } = options;
   const orders: AiWaveStrikeOrder[] = [];
   const launchers: AiLauncherSpawn[] = [];
   const airfieldSorties: AiAirfieldSortieOrder[] = [];
+  const combatPvo = pvoUnits.filter((p) => !p.isRadar);
+  let spawnedKab = false;
+
   const plan: Array<{
     munitionId: MunitionId;
     altitudeMode: AltitudeMode;
@@ -223,89 +298,68 @@ export function generateAiWaveOrders(
     postClimbAltitudeMode?: AltitudeMode;
   }> = [];
 
-  if (waveNumber === 1) {
-    plan.push({ munitionId: 'shahed-136', altitudeMode: 'low' });
-    plan.push({
-      munitionId: 'shahed-136',
-      altitudeMode: 'ultra-low',
-      climbAtProgress: 0.56,
-      postClimbAltitudeMode: 'normal',
-    });
-  } else if (waveNumber === 2) {
-    plan.push({ munitionId: 'shahed-136', altitudeMode: 'low' });
-    plan.push({
-      munitionId: 'shahed-136',
-      altitudeMode: 'ultra-low',
-      climbAtProgress: 0.62,
-      postClimbAltitudeMode: 'normal',
-    });
-    plan.push({ munitionId: 'shahed-238', altitudeMode: 'low' });
-  } else if (waveNumber === 3) {
-    plan.push({ munitionId: 'shahed-136', altitudeMode: 'low' });
-    plan.push({
-      munitionId: 'shahed-136',
-      altitudeMode: 'ultra-low',
-      climbAtProgress: 0.52,
-      postClimbAltitudeMode: 'low',
-    });
-    plan.push({ munitionId: 'kalibr', altitudeMode: 'normal' });
-  } else if (waveNumber === 4) {
-    plan.push({
-      munitionId: 'shahed-136',
-      altitudeMode: 'ultra-low',
-      climbAtProgress: 0.58,
-      postClimbAltitudeMode: 'normal',
-    });
-    plan.push({ munitionId: 'shahed-238', altitudeMode: 'low' });
-    plan.push({ munitionId: 'kh101', altitudeMode: 'normal' });
-  } else if (waveNumber === 5) {
-    plan.push({
-      munitionId: 'shahed-136',
-      altitudeMode: 'ultra-low',
-      climbAtProgress: 0.66,
-      postClimbAltitudeMode: 'normal',
-    });
-    plan.push({ munitionId: 'shahed-238', altitudeMode: 'normal' });
-    plan.push({ munitionId: 'iskander', altitudeMode: 'normal' });
+  // 1. Shahed count by wave type & progression (few at first, growing over days)
+  let shahedCount = 1;
+  if (waveType === 'massive') {
+    shahedCount = 6 + Math.floor(Math.random() * 3); // 6-8
+  } else if (waveType === 'medium_massive') {
+    shahedCount = 3 + Math.floor(Math.random() * 3); // 3-5
   } else {
-    const shahedCount = Math.min(4, 2 + Math.floor((waveNumber - 3) / 3));
-    for (let i = 0; i < shahedCount; i++) {
-      const isJet = i === shahedCount - 1 && waveNumber % 2 === 0;
-      const r = Math.random();
-      const altMode: AltitudeMode = r < 0.36 ? 'ultra-low' : r < 0.78 ? 'low' : 'normal';
-      const willClimb = altMode === 'ultra-low' && Math.random() < 0.85;
-      plan.push({
-        munitionId: isJet ? 'shahed-238' : 'shahed-136',
-        altitudeMode: altMode,
-        climbAtProgress: willClimb ? 0.45 + Math.random() * 0.3 : undefined,
-        postClimbAltitudeMode: willClimb
-          ? Math.random() < 0.72
-            ? 'normal'
-            : 'low'
-          : undefined,
-      });
+    if (waveNumber === 1) {
+      shahedCount = 1;
+    } else if (waveNumber === 2) {
+      shahedCount = 2;
+    } else if (waveNumber <= 5) {
+      shahedCount = 2 + (Math.random() < 0.45 ? 1 : 0);
+    } else {
+      shahedCount = Math.min(5, 2 + Math.floor((waveNumber + currentDay) / 5));
     }
+  }
 
-    const missilePool: MunitionId[] =
-      waveNumber % 4 === 0
-        ? ['kh101', 'iskander']
-        : waveNumber % 3 === 0
-          ? ['iskander', 'kalibr']
-          : ['kalibr', 'kh101'];
-    const missileCount = waveNumber >= 9 ? 2 : 1;
-    for (let m = 0; m < missileCount; m++) {
-      const mId = missilePool[(waveNumber + m) % missilePool.length];
-      plan.push({ munitionId: mId, altitudeMode: 'normal' });
+  for (let i = 0; i < shahedCount; i++) {
+    const canJet = waveNumber >= 2 && (i === shahedCount - 1 || waveType !== 'daily');
+    const isJet = canJet && Math.random() < (waveType === 'daily' ? 0.28 : 0.38);
+    const altCfg =
+      waveNumber === 1 && i === 0
+        ? {
+            altitudeMode: 'ultra-low' as AltitudeMode,
+            climbAtProgress: 0.54,
+            postClimbAltitudeMode: 'normal' as AltitudeMode,
+          }
+        : randomShahedAltitude();
+    plan.push({
+      munitionId: isJet ? 'shahed-238' : 'shahed-136',
+      ...altCfg,
+    });
+  }
+
+  // 2. Missiles ONLY during 'medium_massive' or 'massive' attacks
+  let kalibrShipCount = 0;
+  if (waveType === 'medium_massive') {
+    kalibrShipCount = 2 + Math.floor(Math.random() * 2); // 2-3 Kalibr from sea ship
+    plan.push({ munitionId: 'banderol', altitudeMode: Math.random() < 0.5 ? 'low' : 'normal' });
+    if (Math.random() < 0.65) {
+      plan.push({ munitionId: 'banderol', altitudeMode: 'normal' });
     }
+    if (Math.random() < 0.7) {
+      plan.push({ munitionId: 'iskander', altitudeMode: 'normal' });
+    }
+  } else if (waveType === 'massive') {
+    kalibrShipCount = 4 + Math.floor(Math.random() * 3); // 4-6 Kalibr from Black Sea ship
+    plan.push({ munitionId: 'banderol', altitudeMode: 'low' });
+    plan.push({ munitionId: 'banderol', altitudeMode: 'normal' });
+    plan.push({ munitionId: 'iskander', altitudeMode: 'normal' });
+    plan.push({ munitionId: 'iskander', altitudeMode: 'normal' });
   }
 
   const waveOrigins = [...AI_LAUNCH_ORIGINS].sort(() => Math.random() - 0.5);
   const launcherMap = new Map<string, AiLauncherSpawn>();
-  const combatPvo = pvoUnits.filter((p) => !p.isRadar);
 
   plan.forEach((item, idx) => {
     const shouldTargetPvo =
-      waveNumber >= 2 && combatPvo.length > 0 && Math.random() < (idx === plan.length - 1 ? 0.35 : 0.2);
+      waveNumber >= 2 &&
+      combatPvo.length > 0 &&
+      Math.random() < (idx === plan.length - 1 ? 0.32 : 0.18);
 
     let targetLat = buildings[0].lat;
     let targetLng = buildings[0].lng;
@@ -365,45 +419,173 @@ export function generateAiWaveOrders(
         waypoints: route,
         targetBuildingId,
         targetPvoId,
-        // Deploy visible launcher on map ~2.8s before first missile/drone fires from it
-        delaySec: 2.8 + idx * (isDrone ? 1.35 : 1.05),
+        delaySec: 2.8 + idx * (isDrone ? 1.3 : 1.0),
         originName: assignedLauncher.originName,
       });
     }
   });
 
-  // Remove any launcher that failed route generation and got 0 ammo
-  const validLaunchers = launchers.filter((l) => l.ammo > 0);
+  // 3. Naval Ship in Black Sea launching Kalibr missiles (strictly sea-based)
+  if (kalibrShipCount > 0) {
+    const seaSpot = jitterSeaShipCoords();
+    if (seaSpot) {
+      const shipId = `ai_ship_${waveNumber}_${Math.random().toString(36).slice(2, 6)}`;
+      const firstBldg = buildings[Math.floor(Math.random() * buildings.length)];
+      const shipSpawn: AiLauncherSpawn = {
+        id: shipId,
+        munitionId: 'kalibr',
+        lat: seaSpot.lat,
+        lng: seaSpot.lng,
+        ammo: 0,
+        headingDeg: computeBearingDeg(seaSpot.lat, seaSpot.lng, firstBldg.lat, firstBldg.lng),
+        originName: seaSpot.originName,
+        isNavalShip: true,
+      };
+      launchers.push(shipSpawn);
 
-  // Rare AI Russian Airbase aircraft sortie (every 3rd wave starting from wave 3)
-  if (waveNumber >= 3 && waveNumber % 3 === 0) {
-    const presetIds = Object.keys(AI_STANDOFF_LAUNCH_POINTS);
-    const chosenPresetId = presetIds[(Math.floor(waveNumber / 3) - 1) % presetIds.length];
-    const sortieCfg = AI_STANDOFF_LAUNCH_POINTS[chosenPresetId];
-    const acSpec = RUSSIAN_AIRCRAFT_BY_ID[sortieCfg.aircraftId];
-
-    const chosenBldg = buildings[Math.floor(Math.random() * buildings.length)];
-    const mRoute = buildDynamicAiRedirectWaypoints(
-      sortieCfg.launchPoint.lat,
-      sortieCfg.launchPoint.lng,
-      chosenBldg.lat,
-      chosenBldg.lng,
-      true,
-    );
-
-    if (mRoute) {
-      airfieldSorties.push({
-        airfieldPresetId: chosenPresetId,
-        aircraftId: sortieCfg.aircraftId,
-        missileCount: Math.min(2, acSpec.missileCount),
-        launchPoint: sortieCfg.launchPoint,
-        missileWaypoints: mRoute,
-        targetBuildingId: chosenBldg.id,
-        delaySec: 1.8,
-      });
+      for (let k = 0; k < kalibrShipCount; k++) {
+        const chosenBldg = buildings[Math.floor(Math.random() * buildings.length)];
+        const route = buildDynamicAiRedirectWaypoints(
+          seaSpot.lat,
+          seaSpot.lng,
+          chosenBldg.lat,
+          chosenBldg.lng,
+          Math.random() < 0.55,
+        );
+        if (route) {
+          shipSpawn.ammo += 1;
+          orders.push({
+            launcherId: shipId,
+            munitionId: 'kalibr',
+            lowAltitude: false,
+            altitudeMode: 'normal',
+            waypoints: route,
+            targetBuildingId: chosenBldg.id,
+            delaySec: 3.1 + k * 0.9,
+            originName: seaSpot.originName,
+          });
+        }
+      }
     }
   }
 
-  const nextIntervalSec = Math.max(18, 26 - Math.floor(waveNumber * 0.5));
-  return { launchers: validLaunchers, orders, airfieldSorties, nextIntervalSec };
+  // 4. Daily frontline КАБ attack (at least once every game day)
+  if (forceDailyKab) {
+    let bestOrigin: AiLaunchOrigin | null = null;
+    let bestBldg: { id: string; lat: number; lng: number } | null = null;
+    let bestDist = Infinity;
+
+    for (const kabOrg of AI_KAB_FRONTLINE_ORIGINS) {
+      for (const b of buildings) {
+        const d = haversineDistanceKm(kabOrg.lat, kabOrg.lng, b.lat, b.lng);
+        if (d <= 72 && d < bestDist && isFlightPathAllowed(kabOrg.lat, kabOrg.lng, b.lat, b.lng).allowed) {
+          bestDist = d;
+          bestOrigin = kabOrg;
+          bestBldg = b;
+        }
+      }
+    }
+
+    if (bestOrigin && bestBldg) {
+      const coords = jitterLauncherCoords(bestOrigin);
+      const kabDist = haversineDistanceKm(coords.lat, coords.lng, bestBldg.lat, bestBldg.lng);
+      if (kabDist <= 74 && isFlightPathAllowed(coords.lat, coords.lng, bestBldg.lat, bestBldg.lng).allowed) {
+        const kabLauncherId = `ai_kab_${waveNumber}_${Math.random().toString(36).slice(2, 6)}`;
+        launchers.push({
+          id: kabLauncherId,
+          munitionId: 'kab',
+          lat: coords.lat,
+          lng: coords.lng,
+          ammo: 1,
+          headingDeg: computeBearingDeg(coords.lat, coords.lng, bestBldg.lat, bestBldg.lng),
+          originName: bestOrigin.name,
+        });
+        orders.push({
+          launcherId: kabLauncherId,
+          munitionId: 'kab',
+          altitudeMode: 'normal',
+          waypoints: [
+            { lat: coords.lat, lng: coords.lng },
+            { lat: bestBldg.lat, lng: bestBldg.lng },
+          ],
+          targetBuildingId: bestBldg.id,
+          delaySec: 3.2,
+          originName: bestOrigin.name,
+        });
+        spawnedKab = true;
+      }
+    }
+  }
+
+  // 5. Airfield sorties ONLY in medium_massive or massive raids (plus strategic Kh-101 / Kinzhal)
+  if (waveType === 'massive') {
+    const massiveSortieIds: string[] = ['engels', 'savasleyka'];
+    for (let sIdx = 0; sIdx < massiveSortieIds.length; sIdx++) {
+      const chosenPresetId = massiveSortieIds[sIdx];
+      const sortieCfg = AI_STANDOFF_LAUNCH_POINTS[chosenPresetId];
+      if (!sortieCfg) continue;
+      const acSpec = RUSSIAN_AIRCRAFT_BY_ID[sortieCfg.aircraftId];
+      const chosenBldg = buildings[Math.floor(Math.random() * buildings.length)];
+      const mRoute = buildDynamicAiRedirectWaypoints(
+        sortieCfg.launchPoint.lat,
+        sortieCfg.launchPoint.lng,
+        chosenBldg.lat,
+        chosenBldg.lng,
+        true,
+      );
+      if (mRoute) {
+        airfieldSorties.push({
+          airfieldPresetId: chosenPresetId,
+          aircraftId: sortieCfg.aircraftId,
+          missileCount: Math.min(chosenPresetId === 'engels' ? 3 : 2, acSpec.missileCount),
+          launchPoint: sortieCfg.launchPoint,
+          missileWaypoints: mRoute,
+          targetBuildingId: chosenBldg.id,
+          delaySec: 1.5 + sIdx * 2.2,
+        });
+      }
+    }
+  } else if (waveType === 'medium_massive') {
+    const medPresetIds = ['baltimore', 'shaykovka', 'engels'];
+    const chosenPresetId = medPresetIds[waveNumber % medPresetIds.length];
+    const sortieCfg = AI_STANDOFF_LAUNCH_POINTS[chosenPresetId];
+    if (sortieCfg) {
+      const acSpec = RUSSIAN_AIRCRAFT_BY_ID[sortieCfg.aircraftId];
+      const chosenBldg = buildings[Math.floor(Math.random() * buildings.length)];
+      const mRoute = buildDynamicAiRedirectWaypoints(
+        sortieCfg.launchPoint.lat,
+        sortieCfg.launchPoint.lng,
+        chosenBldg.lat,
+        chosenBldg.lng,
+        true,
+      );
+      if (mRoute) {
+        airfieldSorties.push({
+          airfieldPresetId: chosenPresetId,
+          aircraftId: sortieCfg.aircraftId,
+          missileCount: Math.min(2, acSpec.missileCount),
+          launchPoint: sortieCfg.launchPoint,
+          missileWaypoints: mRoute,
+          targetBuildingId: chosenBldg.id,
+          delaySec: 1.8,
+        });
+      }
+    }
+  }
+
+  const validLaunchers = launchers.filter((l) => l.ammo > 0);
+  const nextIntervalSec =
+    waveType === 'massive'
+      ? 26
+      : waveType === 'medium_massive'
+        ? 23
+        : Math.max(17, 24 - Math.floor(waveNumber * 0.4));
+  return {
+    launchers: validLaunchers,
+    orders,
+    airfieldSorties,
+    nextIntervalSec,
+    waveType,
+    spawnedKab,
+  };
 }

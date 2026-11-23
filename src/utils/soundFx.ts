@@ -1335,37 +1335,34 @@ class TacticalSoundEngine {
     const vol = Math.max(0.2, this.missileVolume);
 
     if (isGun && isSmallBullet) {
-      // Realistic 12.7mm DShK / M2 Browning 3-round pickup burst: sharp supersonic crack + breech punch
-      for (let i = 0; i < 3; i++) {
-        const t = now + i * 0.058;
-        const crack = ctx.createBufferSource();
-        crack.buffer = this.createWhiteNoiseBuffer(ctx, 0.052);
-        const bp = ctx.createBiquadFilter();
-        bp.type = 'bandpass';
-        bp.frequency.setValueAtTime(2200, t);
-        bp.frequency.exponentialRampToValueAtTime(520, t + 0.048);
-        bp.Q.value = 0.85;
-        const sg = ctx.createGain();
-        sg.gain.setValueAtTime(0.18 * vol, t);
-        sg.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
-        crack.connect(bp);
-        bp.connect(sg);
-        sg.connect(dry);
-        sg.connect(wet);
-        crack.start(t);
+      // Single 12.7mm DShK / M2 Browning shot per projectile: crisp supersonic crack + bolt punch
+      const crack = ctx.createBufferSource();
+      crack.buffer = this.createWhiteNoiseBuffer(ctx, 0.055);
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(2150 + Math.random() * 260, now);
+      bp.frequency.exponentialRampToValueAtTime(480, now + 0.05);
+      bp.Q.value = 0.82;
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(0.19 * vol, now);
+      sg.gain.exponentialRampToValueAtTime(0.001, now + 0.052);
+      crack.connect(bp);
+      bp.connect(sg);
+      sg.connect(dry);
+      sg.connect(wet);
+      crack.start(now);
 
-        const thump = ctx.createOscillator();
-        const tg = ctx.createGain();
-        thump.type = 'triangle';
-        thump.frequency.setValueAtTime(185, t);
-        thump.frequency.exponentialRampToValueAtTime(62, t + 0.036);
-        tg.gain.setValueAtTime(0.12 * vol, t);
-        tg.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
-        thump.connect(tg);
-        tg.connect(dry);
-        thump.start(t);
-        thump.stop(t + 0.045);
-      }
+      const thump = ctx.createOscillator();
+      const tg = ctx.createGain();
+      thump.type = 'triangle';
+      thump.frequency.setValueAtTime(178 + Math.random() * 18, now);
+      thump.frequency.exponentialRampToValueAtTime(58, now + 0.038);
+      tg.gain.setValueAtTime(0.13 * vol, now);
+      tg.gain.exponentialRampToValueAtTime(0.001, now + 0.042);
+      thump.connect(tg);
+      tg.connect(dry);
+      thump.start(now);
+      thump.stop(now + 0.046);
       return;
     }
 
@@ -1463,12 +1460,16 @@ class TacticalSoundEngine {
   }
 
   playAirIntercept(isDrone = false, isGun = false) {
+    const volScale = isDrone ? this.droneVolume : this.missileVolume;
+    if (volScale <= 0.005) return;
+
     const g = this.ensureGraph();
     if (!g) return;
     const { ctx, dry } = g;
     const wet = this.reverbNode!;
     const now = ctx.currentTime;
-    const vol = Math.max(0.22, this.missileVolume);
+    const power = isDrone ? 0.86 : 1.02;
+    const dur = 2.0 + power * 0.85;
 
     const shaper = ctx.createWaveShaper();
     shaper.curve = this.getSaturationCurve();
@@ -1476,68 +1477,95 @@ class TacticalSoundEngine {
     shaper.connect(dry);
     shaper.connect(wet);
 
-    // 1. Sharp mid-air proximity-warhead double snap (no synthetic oscillator clang)
-    const crack = ctx.createBufferSource();
-    crack.buffer = this.createWhiteNoiseBuffer(ctx, 0.18);
-    const crackBp = ctx.createBiquadFilter();
-    crackBp.type = 'bandpass';
-    crackBp.frequency.setValueAtTime(isGun ? 2450 : 2100, now);
-    crackBp.frequency.exponentialRampToValueAtTime(310, now + 0.17);
-    crackBp.Q.value = 0.72;
-    const cg = ctx.createGain();
-    cg.gain.setValueAtTime((isGun ? 0.36 : 0.48) * vol, now);
-    cg.gain.exponentialRampToValueAtTime(0.001, now + 0.175);
-    crack.connect(crackBp);
-    crackBp.connect(cg);
-    cg.connect(shaper);
-    crack.start(now);
+    // 1. Instantaneous supersonic shock-front crack (mirrors impact explosion crack)
+    const crackSrc = ctx.createBufferSource();
+    crackSrc.buffer = this.createWhiteNoiseBuffer(ctx, 0.14);
+    const crackFilter = ctx.createBiquadFilter();
+    crackFilter.type = 'bandpass';
+    crackFilter.frequency.setValueAtTime(isGun ? 2750 : 2550, now);
+    crackFilter.frequency.exponentialRampToValueAtTime(220, now + 0.12);
+    crackFilter.Q.value = 0.62;
+    const crackGain = ctx.createGain();
+    crackGain.gain.setValueAtTime(Math.min(0.6, 0.45 * power) * volScale, now);
+    crackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    crackSrc.connect(crackFilter);
+    crackFilter.connect(crackGain);
+    crackGain.connect(shaper);
+    crackSrc.start(now);
 
-    // 2. Concussive outdoor sky pressure boom (target warhead / fuel tank cook-off)
-    const pop = ctx.createOscillator();
-    const pg = ctx.createGain();
-    pop.type = 'sine';
-    pop.frequency.setValueAtTime(isDrone ? 118 : 94, now);
-    pop.frequency.exponentialRampToValueAtTime(24, now + 0.34);
-    pg.gain.setValueAtTime((isDrone ? 0.38 : 0.48) * vol, now);
-    pg.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
-    pop.connect(pg);
-    pg.connect(shaper);
-    pop.start(now);
-    pop.stop(now + 0.38);
+    // 2. Real-life sub-bass blast pressure drop (78Hz -> 17Hz) matching target impact
+    const subOsc = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    subOsc.type = 'sine';
+    subOsc.frequency.setValueAtTime(isDrone ? 82 : 76, now);
+    subOsc.frequency.exponentialRampToValueAtTime(17, now + 0.66);
+    subGain.gain.setValueAtTime(Math.min(0.82, 0.6 * power) * volScale, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.72);
+    subOsc.connect(subGain);
+    subGain.connect(shaper);
+    subOsc.start(now);
+    subOsc.stop(now + 0.74);
 
-    // 3. Broadband airburst blast & distant atmospheric rumble tail
-    const blast = ctx.createBufferSource();
-    blast.buffer = this.createBrownNoiseBuffer(ctx, 1.15);
-    const blastLp = ctx.createBiquadFilter();
-    blastLp.type = 'lowpass';
-    blastLp.frequency.setValueAtTime(980, now);
-    blastLp.frequency.exponentialRampToValueAtTime(110, now + 1.05);
+    // 3. Heavy broadband high-explosive warhead detonation body
+    const blastSrc = ctx.createBufferSource();
+    blastSrc.buffer = this.createBrownNoiseBuffer(ctx, dur);
+    const blastFilter = ctx.createBiquadFilter();
+    blastFilter.type = 'lowpass';
+    blastFilter.frequency.setValueAtTime(2050, now);
+    blastFilter.frequency.exponentialRampToValueAtTime(84, now + dur * 0.78);
+    blastFilter.Q.value = 0.65;
+
     const blastGain = ctx.createGain();
-    blastGain.gain.setValueAtTime(0.01, now);
-    blastGain.gain.linearRampToValueAtTime((isDrone ? 0.32 : 0.42) * vol, now + 0.02);
-    blastGain.gain.exponentialRampToValueAtTime(0.001, now + 1.14);
-    blast.connect(blastLp);
-    blastLp.connect(blastGain);
-    blastGain.connect(wet);
-    blastGain.connect(dry);
-    blast.start(now);
+    blastGain.gain.setValueAtTime(0.04 * volScale, now);
+    blastGain.gain.linearRampToValueAtTime(Math.min(0.78, 0.54 * power) * volScale, now + 0.015);
+    blastGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
 
-    // 4. Fragmentation air-tear & falling debris scatter
-    const shred = ctx.createBufferSource();
-    shred.buffer = this.createPinkNoiseBuffer(ctx, 0.52);
-    const shredBp = ctx.createBiquadFilter();
-    shredBp.type = 'bandpass';
-    shredBp.frequency.setValueAtTime(1450, now + 0.04);
-    shredBp.frequency.exponentialRampToValueAtTime(280, now + 0.5);
-    shredBp.Q.value = 1.1;
-    const shredGain = ctx.createGain();
-    shredGain.gain.setValueAtTime(0.001, now + 0.03);
-    shredGain.gain.linearRampToValueAtTime(0.2 * vol, now + 0.06);
-    shredGain.gain.exponentialRampToValueAtTime(0.001, now + 0.51);
-    shred.connect(shredBp);
-    shredBp.connect(shredGain);
-    shredGain.connect(wet);
-    shred.start(now + 0.03);
+    blastSrc.connect(blastFilter);
+    blastFilter.connect(blastGain);
+    blastGain.connect(shaper);
+    blastSrc.start(now);
+
+    // 4. Rolling horizon thunder & urban valley echo tail
+    const rumbleSrc = ctx.createBufferSource();
+    rumbleSrc.buffer = this.createPinkNoiseBuffer(ctx, dur * 1.32);
+    const rumbleFilter = ctx.createBiquadFilter();
+    rumbleFilter.type = 'lowpass';
+    rumbleFilter.frequency.setValueAtTime(620, now + 0.06);
+    rumbleFilter.frequency.exponentialRampToValueAtTime(72, now + dur * 1.25);
+
+    const rumbleGain = ctx.createGain();
+    rumbleGain.gain.setValueAtTime(0.001, now);
+    rumbleGain.gain.linearRampToValueAtTime(0.3 * power * volScale, now + 0.13);
+    rumbleGain.gain.exponentialRampToValueAtTime(0.001, now + dur * 1.3);
+
+    rumbleSrc.connect(rumbleFilter);
+    rumbleFilter.connect(rumbleGain);
+    rumbleGain.connect(wet);
+    rumbleGain.connect(dry);
+    rumbleSrc.start(now + 0.03);
+
+    // 5. Shrapnel & falling debris echoes
+    for (const [delay, freq] of [
+      [0.19, 1020],
+      [0.42, 740],
+      [0.68, 520],
+    ] as const) {
+      const debSrc = ctx.createBufferSource();
+      debSrc.buffer = this.createPinkNoiseBuffer(ctx, 0.26);
+      const debFilter = ctx.createBiquadFilter();
+      debFilter.type = 'bandpass';
+      debFilter.frequency.setValueAtTime(freq, now + delay);
+      debFilter.frequency.exponentialRampToValueAtTime(195, now + delay + 0.24);
+      debFilter.Q.value = 1.05;
+      const debGain = ctx.createGain();
+      debGain.gain.setValueAtTime(0.001, now + delay);
+      debGain.gain.linearRampToValueAtTime(0.1 * Math.min(1.3, power) * volScale, now + delay + 0.02);
+      debGain.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.25);
+      debSrc.connect(debFilter);
+      debFilter.connect(debGain);
+      debGain.connect(wet);
+      debSrc.start(now + delay);
+    }
   }
 
   playExplosion(power = 1, isDrone = false) {

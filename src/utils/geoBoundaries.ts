@@ -194,10 +194,18 @@ export function isInsideThirdCountry(lat: number, lng: number): boolean {
   return pointInIndexedPolygons(lat, lng, thirdCountryPolygons);
 }
 
+export function isBlackOrAzovSeaPoint(lat: number, lng: number): boolean {
+  // Bound strictly within open Black Sea & Sea of Azov, outside UA/RU land and third-country coasts/waters
+  if (lat < 42.15 || lat > 47.25 || lng < 29.15 || lng > 40.35) return false;
+  if (lat < 42.6 && lng > 37.5) return false; // Georgian / SE Turkish coastal corridor
+  if (lat < 44.8 && lng < 29.45) return false; // Romanian / Bulgarian coastal waters
+  if (getTerritoryAt(lat, lng) !== null || isInsideThirdCountry(lat, lng)) return false;
+  return true;
+}
+
 /**
- * Ensures both launcher and target are strictly within Ukraine or Russia,
- * and checks that the flight corridor stays within Ukraine/Russia airspace
- * (never crossing third-country landmasses such as Belarus, Poland, Baltics, etc.).
+ * Ensures launcher is strictly within Ukraine, Russia, or Black/Azov Sea,
+ * target is within Ukraine or Russia, and the flight corridor never crosses third countries.
  */
 export function isFlightPathAllowed(
   startLat: number,
@@ -206,8 +214,9 @@ export function isFlightPathAllowed(
   endLng: number,
 ): { allowed: boolean; reason?: string } {
   const startTerritory = getTerritoryAt(startLat, startLng);
-  if (!startTerritory) {
-    return { allowed: false, reason: 'Пусковая установка должна быть в Украине или России' };
+  const startInSea = !startTerritory && isBlackOrAzovSeaPoint(startLat, startLng);
+  if (!startTerritory && !startInSea) {
+    return { allowed: false, reason: 'Пусковая установка должна быть в Украине, России или в море' };
   }
   const endTerritory = getTerritoryAt(endLat, endLng);
   if (!endTerritory) {
@@ -221,10 +230,8 @@ export function isFlightPathAllowed(
     const t = i / steps;
     const pt = interpolatePath(startLat, startLng, endLat, endLng, t);
     const territory = getTerritoryAt(pt.lat, pt.lng);
-    if (territory) continue;
+    if (territory || isBlackOrAzovSeaPoint(pt.lat, pt.lng)) continue;
 
-    // Allow narrow internal coastal waters (e.g. Sea of Azov / Karkinit Bay)
-    // only if not entering any third country and staying close to UA/RU shoreline.
     if (isInsideThirdCountry(pt.lat, pt.lng)) {
       return {
         allowed: false,

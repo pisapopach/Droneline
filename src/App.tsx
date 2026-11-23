@@ -46,7 +46,9 @@ import {
   BuildingIcon,
   MunitionIcon,
   RussianAircraftIcon,
+  ShipIcon,
 } from './components/MunitionIcon';
+import { MobileHud } from './components/MobileHud';
 import {
   TacticalMap,
   type MapStats,
@@ -62,9 +64,10 @@ import {
   type TelegramIntelPayload,
 } from './components/TacticalMap';
 import {
+  ALL_AIRCRAFT,
   RUSSIAN_AIRBASE_PRESETS,
-  RUSSIAN_AIRCRAFT,
   RUSSIAN_AIRCRAFT_BY_ID,
+  UKRAINIAN_AIRBASE_PRESETS,
   type RussianAirbasePreset,
   type RussianAircraftId,
 } from './data/airfields';
@@ -77,6 +80,7 @@ import {
   generateAiWaveOrders,
   type AiAirfieldSortieOrder,
   type AiWaveStrikeOrder,
+  type AiWaveType,
 } from './data/aiScenario';
 import {
   AIR_DEFENSE_BY_ID,
@@ -94,6 +98,7 @@ import { isPointInOccupiedTerritory } from './utils/frontline2026';
 import { getTerritoryAt } from './utils/geoBoundaries';
 import { soundFx } from './utils/soundFx';
 import {
+  RUSSIA_TELEGRAM_CHANNELS,
   UKRAINE_TELEGRAM_CHANNELS,
   buildTelegramMessageText,
   computeCompassDirectionRu,
@@ -113,16 +118,64 @@ interface TacticalEventEntry extends TacticalEventPayload {
   simTimeMinutes: number;
 }
 
-const INITIAL_SIM_MINUTES = 120; // День 1 · 02:00
-const SIM_MINUTES_PER_REAL_SEC = 3; // 3 минуты игровых = 1 секунда в реальной жизни
+const SIM_EPOCH_MS = Date.UTC(2026, 10, 23, 0, 0);
+const MANUAL_AIRFIELD_SQUADRONS: RussianAircraftId[][] = [
+  ['mig31k', 'su57-x69'],
+  ['tu95', 'tu160'],
+  ['tu22m3', 'mig31k'],
+  ['su57-x69', 'tu22m3'],
+  ['tu160', 'tu95'],
+];
+const MANUAL_UA_AIRFIELD_SQUADRONS: RussianAircraftId[][] = [
+  ['su24m', 'f16am'],
+  ['mig29ua', 'su24m'],
+  ['f16am', 'mig29ua'],
+];
+
+function detectMobileViewport(): boolean {
+  if (typeof window === 'undefined') return false;
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const coarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
+  return w < 768 || (coarse && w < 960 && h < 1024);
+}
+const RU_MONTHS_SHORT = [
+  'янв',
+  'фев',
+  'мар',
+  'апр',
+  'мая',
+  'июн',
+  'июл',
+  'авг',
+  'сен',
+  'окт',
+  'ноя',
+  'дек',
+] as const;
+const INITIAL_SIM_MINUTES = 120; // 23 ноя 2026 · 02:00 (Д.1)
+const SIM_MINUTES_PER_REAL_SEC = 10; // 10 минут игровых = 1 секунда в реальной жизни
 
 function formatSimClock(totalMinutes: number): string {
   const total = Math.floor(Math.max(0, totalMinutes));
-  const day = Math.floor(total / 1440) + 1;
-  const minsInDay = total % 1440;
-  const hh = String(Math.floor(minsInDay / 60)).padStart(2, '0');
-  const mm = String(minsInDay % 60).padStart(2, '0');
-  return `День ${day} · ${hh}:${mm}`;
+  const d = new Date(SIM_EPOCH_MS + total * 60_000);
+  const dayNum = Math.floor(total / 1440) + 1;
+  const dd = d.getUTCDate();
+  const mon = RU_MONTHS_SHORT[d.getUTCMonth()];
+  const yyyy = d.getUTCFullYear();
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${dd} ${mon} ${yyyy} · ${hh}:${mm} (Д.${dayNum})`;
+}
+
+function formatSimDateShort(totalMinutes: number): string {
+  const total = Math.floor(Math.max(0, totalMinutes));
+  const d = new Date(SIM_EPOCH_MS + total * 60_000);
+  const dayNum = Math.floor(total / 1440) + 1;
+  const dd = d.getUTCDate();
+  const mon = RU_MONTHS_SHORT[d.getUTCMonth()];
+  const yyyy = d.getUTCFullYear();
+  return `${dd} ${mon} ${yyyy} · День ${dayNum}`;
 }
 
 function formatSimTimeShort(totalMinutes: number): string {
@@ -172,8 +225,12 @@ export default function App() {
   const [airfieldMissileWaypoints, setAirfieldMissileWaypoints] = useState<RoutePoint[]>([]);
   const [launchAirfieldSignal, setLaunchAirfieldSignal] = useState<number>(0);
   const [airfieldMenuOpen, setAirfieldMenuOpen] = useState<boolean>(false);
+  const [uaAirfieldMenuOpen, setUaAirfieldMenuOpen] = useState<boolean>(false);
   const [airfieldModalStep, setAirfieldModalStep] = useState<'aircraft' | 'missiles' | null>(null);
   const [su57DropPoint, setSu57DropPoint] = useState<RoutePoint | null>(null);
+
+  const [isMobile, setIsMobile] = useState<boolean>(() => detectMobileViewport());
+  const [mobileSteerDir, setMobileSteerDir] = useState<-1 | 0 | 1>(0);
 
   // Mid-flight dynamic route steering & Shahed nose follow-cam
   const [selectedFlight, setSelectedFlight] = useState<SelectedFlightInfo | null>(null);
@@ -195,6 +252,7 @@ export default function App() {
   const [drawerTab, setDrawerTab] = useState<DrawerTab>('stats');
   const [telegramOpen, setTelegramOpen] = useState<boolean>(false);
   const [phoneScreen, setPhoneScreen] = useState<'telegram' | 'home'>('telegram');
+  const [telegramCountryFilter, setTelegramCountryFilter] = useState<'UA' | 'RU'>('UA');
   const [selectedTelegramOblast, setSelectedTelegramOblast] = useState<string | null>(null);
   const [telegramSearch, setTelegramSearch] = useState<string>('');
   const [telegramPosts, setTelegramPosts] = useState<TelegramPost[]>([]);
@@ -257,6 +315,9 @@ export default function App() {
   const aiWaveNumberRef = useRef(aiWaveNumber);
   aiWaveNumberRef.current = aiWaveNumber;
   const aiWaveCountdownRef = useRef(aiWaveCountdownSec);
+  const lastKabDayRef = useRef(0);
+  const lastMediumDayRef = useRef(0);
+  const nextMassiveDayRef = useRef(6);
   const aiHadBuildingsRef = useRef(false);
   const telegramOpenRef = useRef(telegramOpen);
   telegramOpenRef.current = telegramOpen;
@@ -272,6 +333,18 @@ export default function App() {
       setWarning(null);
     }, 3200);
   }, []);
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(detectMobileViewport());
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedFlight) {
+      setMobileSteerDir(0);
+    }
+  }, [selectedFlight]);
 
   const toggleMute = useCallback(() => {
     setMuted((prev) => {
@@ -338,18 +411,53 @@ export default function App() {
       aiWaveCountdownRef.current -= simDt;
       if (aiWaveCountdownRef.current <= 0) {
         const nextWave = aiWaveNumberRef.current + 1;
+        const currentDay = Math.floor(Math.max(0, simTimeMinutesRef.current) / 1440) + 1;
+        let waveType: AiWaveType = 'daily';
+        if (currentDay >= nextMassiveDayRef.current) {
+          waveType = 'massive';
+          // Maximum once every 3-5 game weeks (21-35 game days)
+          nextMassiveDayRef.current = currentDay + 21 + Math.floor(Math.random() * 15);
+          lastMediumDayRef.current = currentDay;
+        } else if (
+          currentDay >= 3 &&
+          currentDay - lastMediumDayRef.current >= 3 &&
+          Math.random() < 0.45
+        ) {
+          waveType = 'medium_massive';
+          lastMediumDayRef.current = currentDay;
+        }
+        const forceDailyKab = currentDay > lastKabDayRef.current;
+
         const pvoSummary = airDefensesRef.current.map((p) => ({
           id: p.id,
           lat: p.lat,
           lng: p.lng,
           isRadar: Boolean(AIR_DEFENSE_BY_ID[p.airDefenseId].isRadar),
         }));
-        const { launchers: waveLaunchers, orders, airfieldSorties, nextIntervalSec } =
-          generateAiWaveOrders(nextWave, buildingsRef.current, pvoSummary);
+        const {
+          launchers: waveLaunchers,
+          orders,
+          airfieldSorties,
+          nextIntervalSec,
+          spawnedKab,
+        } = generateAiWaveOrders(nextWave, buildingsRef.current, pvoSummary, {
+          currentDay,
+          waveType,
+          forceDailyKab,
+        });
+        if (spawnedKab) {
+          lastKabDayRef.current = currentDay;
+        }
         aiWaveNumberRef.current = nextWave;
         setAiWaveNumber(nextWave);
         aiWaveCountdownRef.current = nextIntervalSec;
         setAiWaveCountdownSec(nextIntervalSec);
+
+        if (waveType === 'massive') {
+          showWarning('Внимание: фиксируется массированная ракетно-дроновая атака!');
+        } else if (waveType === 'medium_massive') {
+          showWarning('Внимание: комбинированный ракетно-дроновый удар противника!');
+        }
 
         if (waveLaunchers.length > 0) {
           const placedAiLaunchers: PlacedLauncher[] = waveLaunchers.map((wl) => ({
@@ -362,6 +470,7 @@ export default function App() {
             lastLaunchAt: 0,
             headingDeg: wl.headingDeg,
             isAi: true,
+            isNavalShip: wl.isNavalShip,
           }));
           setLaunchers((prev) => [...prev, ...placedAiLaunchers]);
         }
@@ -376,7 +485,7 @@ export default function App() {
       }
     }, tickMs);
     return () => window.clearInterval(id);
-  }, [gameScreen, gameMode]);
+  }, [gameScreen, gameMode, showWarning]);
 
   // Track AI mode Game Over when all defended buildings are destroyed
   useEffect(() => {
@@ -400,6 +509,7 @@ export default function App() {
     setSelectedLauncherId(null);
     setSelectedAirfieldId(null);
     setSelectedFlight(null);
+    setMobileSteerDir(0);
     setFollowCamActive(false);
     setFlightAltitudeCommand(null);
     setIsPlottingFlightRoute(false);
@@ -435,6 +545,9 @@ export default function App() {
       setMoney(AI_STARTING_MONEY);
       aiWaveNumberRef.current = 0;
       setAiWaveNumber(0);
+      lastKabDayRef.current = 0;
+      lastMediumDayRef.current = 0;
+      nextMassiveDayRef.current = 4 + Math.floor(Math.random() * 8);
       aiWaveCountdownRef.current = AI_FIRST_WAVE_PREP_SEC;
       setAiWaveCountdownSec(AI_FIRST_WAVE_PREP_SEC);
       setAiSurvivedSec(0);
@@ -450,7 +563,7 @@ export default function App() {
       setSidebarOpen(true);
       setFocusCoords({ lat: 49.4, lng: 34.8, zoom: 5 });
     }
-    soundFx.playSelectLauncher();
+    soundFx.playUiClick('confirm');
   };
 
   const handleReturnToMenu = () => {
@@ -463,6 +576,7 @@ export default function App() {
     setSelectedLauncherId(null);
     setSelectedAirfieldId(null);
     setSelectedFlight(null);
+    setMobileSteerDir(0);
     setFollowCamActive(false);
     setFlightAltitudeCommand(null);
     setIsPlottingFlightRoute(false);
@@ -569,6 +683,7 @@ export default function App() {
     setSelectedLauncherId(null);
     setSelectedAirfieldId(null);
     setSelectedFlight(null);
+    setMobileSteerDir(0);
     setIsPlottingFlightRoute(false);
     setFlightRouteWaypoints([]);
     setAirfieldLaunchPoint(null);
@@ -623,11 +738,46 @@ export default function App() {
   const handleStartManualAirfieldPlacement = () => {
     clearSelectionModes();
     setPendingPlacement((prev) => (prev?.kind === 'airfield' ? null : { kind: 'airfield' }));
-    soundFx.playSelectLauncher();
+    soundFx.playUiClick('tap');
     if (window.innerWidth < 768) {
       setSidebarOpen(false);
     }
   };
+
+  const handleStartManualUaAirfieldPlacement = () => {
+    clearSelectionModes();
+    setPendingPlacement((prev) => (prev?.kind === 'airfield-ua' ? null : { kind: 'airfield-ua' }));
+    soundFx.playUiClick('tap');
+    if (window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
+  };
+
+  const handleStartNavalShipPlacement = () => {
+    clearSelectionModes();
+    setPendingPlacement((prev) => (prev?.kind === 'ship' ? null : { kind: 'ship' }));
+    soundFx.playUiClick('tap');
+    if (window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
+  };
+
+  const handlePlaceNavalShip = useCallback((lat: number, lng: number) => {
+    const newShip: PlacedLauncher = {
+      id: `ship_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      munitionId: 'kalibr',
+      lat,
+      lng,
+      ammo: 8,
+      maxAmmo: 8,
+      lastLaunchAt: 0,
+      headingDeg: 0,
+      isNavalShip: true,
+    };
+    setLaunchers((prev) => [...prev, newShip]);
+    setPendingPlacement(null);
+    setSelectedLauncherId(null);
+  }, []);
 
   const handleDeployPresetAirbase = (preset: RussianAirbasePreset) => {
     setPendingPlacement(null);
@@ -648,9 +798,11 @@ export default function App() {
       id: `af_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       name: preset.name,
       presetId: preset.id,
+      faction: preset.faction,
       lat: preset.lat,
       lng: preset.lng,
       selectedAircraftId: preset.defaultAircraftId,
+      availableAircraftIds: preset.availableAircraftIds,
       salvoCount: defaultSpec.missileCount,
     };
     setAirfields((prev) => [...prev, newAirfield]);
@@ -661,21 +813,29 @@ export default function App() {
     }
   };
 
-  const handlePlaceAirfield = useCallback((lat: number, lng: number) => {
-    const defaultAircraftId: RussianAircraftId = 'mig31k';
-    const defaultSpec = RUSSIAN_AIRCRAFT_BY_ID[defaultAircraftId];
+  const handlePlaceAirfield = useCallback((lat: number, lng: number, faction: 'RU' | 'UA' = 'RU') => {
     const id = `af_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    setAirfields((prev) => [
-      ...prev,
-      {
-        id,
-        name: `Аэродром #${prev.length + 1}`,
-        lat,
-        lng,
-        selectedAircraftId: defaultAircraftId,
-        salvoCount: defaultSpec.missileCount,
-      },
-    ]);
+    setAirfields((prev) => {
+      const isUa = faction === 'UA';
+      const sameFactionCount = prev.filter((a) => (a.faction ?? 'RU') === faction).length;
+      const squadrons = isUa ? MANUAL_UA_AIRFIELD_SQUADRONS : MANUAL_AIRFIELD_SQUADRONS;
+      const roster = squadrons[sameFactionCount % squadrons.length];
+      const defaultAircraftId = roster[0];
+      const defaultSpec = RUSSIAN_AIRCRAFT_BY_ID[defaultAircraftId];
+      return [
+        ...prev,
+        {
+          id,
+          name: isUa ? `Аэродром ВСУ #${sameFactionCount + 1}` : `Аэродром #${sameFactionCount + 1}`,
+          faction,
+          lat,
+          lng,
+          selectedAircraftId: defaultAircraftId,
+          availableAircraftIds: roster,
+          salvoCount: defaultSpec.missileCount,
+        },
+      ];
+    });
     setPendingPlacement(null);
     setSelectedLauncherId(null);
     setSelectedFlight(null);
@@ -751,11 +911,11 @@ export default function App() {
   const handleChangeAirfieldAircraft = (airfieldId: string, aircraftId: RussianAircraftId) => {
     const spec = RUSSIAN_AIRCRAFT_BY_ID[aircraftId];
     setAirfields((prev) =>
-      prev.map((a) =>
-        a.id === airfieldId
-          ? { ...a, selectedAircraftId: aircraftId, salvoCount: spec.missileCount }
-          : a,
-      ),
+      prev.map((a) => {
+        if (a.id !== airfieldId) return a;
+        if (a.availableAircraftIds && !a.availableAircraftIds.includes(aircraftId)) return a;
+        return { ...a, selectedAircraftId: aircraftId, salvoCount: spec.missileCount };
+      }),
     );
     setAirfieldLaunchPoint(null);
     setAirfieldMissileWaypoints([]);
@@ -1024,8 +1184,11 @@ export default function App() {
   }, []);
 
   const handleTelegramIntel = useCallback((intel: TelegramIntelPayload) => {
-    if (!getTelegramChannelByOblast(intel.oblast)) return;
+    const chMeta = getTelegramChannelByOblast(intel.oblast);
+    if (!chMeta) return;
     const text = buildTelegramMessageText({
+      country: chMeta.country,
+      count: intel.count,
       munitionId: intel.munitionId,
       carrierAircraftId: intel.carrierAircraftId,
       targetCity: intel.targetCity,
@@ -1043,6 +1206,8 @@ export default function App() {
     const post: TelegramPost = {
       id: `tg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       oblast: intel.oblast,
+      country: chMeta.country,
+      count: intel.count,
       munitionId: intel.munitionId,
       carrierAircraftId: intel.carrierAircraftId,
       targetCity: intel.targetCity,
@@ -1095,6 +1260,7 @@ export default function App() {
     setBuildings([]);
     setPendingPlacement(null);
     clearSelectionModes();
+    setMobileSteerDir(0);
     setFollowCamActive(false);
     setFlightAltitudeCommand(null);
     setEventLog([]);
@@ -1113,6 +1279,8 @@ export default function App() {
   const pendingInfraSpec =
     pendingPlacement?.kind === 'infra' ? BUILDING_BY_ID[pendingPlacement.id] : null;
   const pendingAirfield = pendingPlacement?.kind === 'airfield';
+  const pendingAirfieldUa = pendingPlacement?.kind === 'airfield-ua';
+  const pendingShip = pendingPlacement?.kind === 'ship';
 
   const selectedLauncher = selectedLauncherId
     ? launchers.find((l) => l.id === selectedLauncherId) ?? null
@@ -1150,13 +1318,23 @@ export default function App() {
     interceptAttempts > 0 ? Math.round((stats.intercepts / interceptAttempts) * 100) : 0;
 
   const totalTelegramUnread = Object.values(telegramUnreadByOblast).reduce((sum, n) => sum + n, 0);
+  const telegramUnreadUa = UKRAINE_TELEGRAM_CHANNELS.reduce(
+    (sum, ch) => sum + (telegramUnreadByOblast[ch.oblast] ?? 0),
+    0,
+  );
+  const telegramUnreadRu = RUSSIA_TELEGRAM_CHANNELS.reduce(
+    (sum, ch) => sum + (telegramUnreadByOblast[ch.oblast] ?? 0),
+    0,
+  );
   const activeTelegramChannel = selectedTelegramOblast
     ? getTelegramChannelByOblast(selectedTelegramOblast)
     : null;
   const activeTelegramMessages = selectedTelegramOblast
     ? telegramPosts.filter((p) => p.oblast === selectedTelegramOblast)
     : [];
-  const filteredTelegramChannels = UKRAINE_TELEGRAM_CHANNELS.filter((ch) => {
+  const activeCountryChannels =
+    telegramCountryFilter === 'RU' ? RUSSIA_TELEGRAM_CHANNELS : UKRAINE_TELEGRAM_CHANNELS;
+  const filteredTelegramChannels = activeCountryChannels.filter((ch) => {
     const q = telegramSearch.trim().toLowerCase();
     if (!q) return true;
     return (
@@ -1175,7 +1353,11 @@ export default function App() {
 
   if (gameScreen === 'menu') {
     return (
-      <div className="relative flex h-screen w-screen flex-col items-center justify-center bg-[#10130F] text-[#ECE8DD] select-none overflow-hidden px-4 py-6">
+      <div
+        className={`relative flex w-screen flex-col items-center justify-center bg-[#10130F] text-[#ECE8DD] select-none px-4 py-6 ${
+          isMobile ? 'min-h-[100dvh] overflow-y-auto' : 'h-screen overflow-hidden'
+        }`}
+      >
         {/* Atmospheric Military Topographic & Radar Cartography Backdrop */}
         <div
           aria-hidden="true"
@@ -1271,7 +1453,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
-                soundFx.playSelectLauncher();
+                soundFx.playUiClick('confirm');
                 setMenuStep('modes');
               }}
               className="mt-8 w-full max-w-[270px] flex items-center justify-center gap-2.5 bg-[#DF9A2B] hover:bg-[#EDA938] text-[#111410] font-bold text-base tracking-wide px-8 py-3.5 shadow-[0_3px_0_#915F12] active:translate-y-[1px] transition-all cursor-pointer whitespace-nowrap shrink-0"
@@ -1301,7 +1483,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    soundFx.playSelectLauncher();
+                    soundFx.playUiClick('back');
                     setMenuStep('title');
                   }}
                   aria-label="Назад"
@@ -1393,6 +1575,248 @@ export default function App() {
     );
   }
 
+  if (isMobile) {
+    return (
+      <div className="flex h-[100dvh] w-screen flex-col bg-[#070B12] text-slate-100 select-none overflow-hidden">
+        <main className="relative flex-1 min-w-0 h-full">
+          <TacticalMap
+            isMobile={true}
+            mobileSteerDir={mobileSteerDir}
+            gameMode={gameMode}
+            launchers={launchers}
+            airfields={airfields}
+            airDefenses={airDefenses}
+            buildings={buildings}
+            pendingPlacement={pendingPlacement}
+            selectedLauncherId={selectedLauncherId}
+            selectedAirfieldId={selectedAirfieldId}
+            selectedFlightId={selectedFlight?.id ?? null}
+            airfieldLaunchPoint={airfieldLaunchPoint}
+            airfieldMissileWaypoints={airfieldMissileWaypoints}
+            launchAirfieldSignal={launchAirfieldSignal}
+            su57DropPoint={su57DropPoint}
+            isPlottingRoute={isPlottingRoute}
+            routeWaypoints={routeWaypoints}
+            routeLaunchCount={effectiveRouteLaunchCount}
+            routeAltitudeMode={routeAltitudeMode}
+            launchRouteSignal={launchRouteSignal}
+            isPlottingFlightRoute={isPlottingFlightRoute}
+            flightRouteWaypoints={flightRouteWaypoints}
+            applyFlightRouteSignal={applyFlightRouteSignal}
+            flightAltitudeCommand={flightAltitudeCommand}
+            exitFollowCamSignal={exitFollowCamSignal}
+            detonateFlightSignal={detonateFlightSignal}
+            aiWaveSignal={aiWaveSignal}
+            pendingAiWaveOrders={pendingAiWaveOrders}
+            pendingAiSorties={pendingAiSorties}
+            buildingScale={buildingScale}
+            timeScale={timeScale}
+            mapStyle={mapStyle}
+            showLabels={showLabels}
+            showRaions={showRaions}
+            showFrontline={showFrontline}
+            alertRadiusKm={alertRadiusKm}
+            alertHoldoverSec={alertHoldoverSec}
+            clearSignal={clearSignal}
+            focusCoords={focusCoords}
+            onChangeMapStyle={setMapStyle}
+            onPlaceStrikeLauncher={handlePlaceStrikeLauncher}
+            onPlaceNavalShip={handlePlaceNavalShip}
+            onPlaceAirfield={handlePlaceAirfield}
+            onPlaceAirDefense={handlePlaceAirDefense}
+            onPlaceBuilding={handlePlaceBuilding}
+            onSelectLauncher={handleSelectLauncher}
+            onSelectAirfield={handleSelectAirfield}
+            onSelectFlight={handleSelectFlight}
+            onFollowCamChange={setFollowCamActive}
+            onAddFlightWaypoint={handleAddFlightWaypoint}
+            onFlightRouteApplied={handleFlightRouteApplied}
+            onSetAirfieldLaunchPoint={setAirfieldLaunchPoint}
+            onAddAirfieldWaypoint={handleAddAirfieldWaypoint}
+            onAirfieldLaunched={handleAirfieldLaunched}
+            onAiWaveOrdersConsumed={() => {
+              setPendingAiWaveOrders([]);
+              setPendingAiSorties([]);
+            }}
+            onRemoveLauncher={handleRemoveLauncher}
+            onRemoveAirfield={handleRemoveAirfield}
+            onRemovePvo={handleRemovePvo}
+            onRemoveBuilding={handleRemoveBuilding}
+            onSetSu57DropPoint={setSu57DropPoint}
+            onCancelPending={() => setPendingPlacement(null)}
+            onAddWaypoint={handleAddWaypoint}
+            onRouteLaunched={handleRouteLaunched}
+            onLaunchStarted={handleLaunchStarted}
+            onPvoFired={handlePvoFired}
+            onUnitsDestroyed={handleUnitsDestroyed}
+            onAirDefensesDamaged={handleAirDefensesDamaged}
+            onBuildingsDamaged={handleBuildingsDamaged}
+            onTacticalEvent={handleTacticalEvent}
+            onTelegramIntel={handleTelegramIntel}
+            onWarning={showWarning}
+            onStatsChange={setStats}
+          />
+          <MobileHud
+            gameMode={gameMode}
+            gameScreen={gameScreen === 'gameover' ? 'gameover' : 'playing'}
+            simTimeMinutes={simTimeMinutes}
+            formatSimDateShort={formatSimDateShort}
+            formatSimTimeShort={formatSimTimeShort}
+            formatSimClock={formatSimClock}
+            money={money}
+            aiIncomePerSec={aiIncomePerSec}
+            aiWaveNumber={aiWaveNumber}
+            aiWaveCountdownSec={aiWaveCountdownSec}
+            aiSurvivedSec={aiSurvivedSec}
+            timeScale={timeScale}
+            onChangeTimeScale={setTimeScale}
+            muted={muted}
+            onToggleMute={toggleMute}
+            showFrontline={showFrontline}
+            onToggleFrontline={() => setShowFrontline((v) => !v)}
+            showRaions={showRaions}
+            onToggleRaions={() => setShowRaions((v) => !v)}
+            showLabels={showLabels}
+            onToggleLabels={() => setShowLabels((v) => !v)}
+            mapStyle={mapStyle}
+            onChangeMapStyle={setMapStyle}
+            onReturnToMenu={handleReturnToMenu}
+            onClearAll={handleClearAll}
+            onStartAiAgain={() => handleStartGame('ai')}
+            stats={stats}
+            buildingsIntegrityPct={buildingsIntegrityPct}
+            interceptAccuracyPct={interceptAccuracyPct}
+            launchers={launchers}
+            playerLaunchers={playerLaunchers}
+            airfields={airfields}
+            playerAirfields={playerAirfields}
+            airDefenses={airDefenses}
+            buildings={buildings}
+            aiActiveLaunchersCount={aiActiveLaunchersCount}
+            aiAirfieldsCount={aiAirfieldsCount}
+            pendingPlacement={pendingPlacement}
+            onCancelPending={() => setPendingPlacement(null)}
+            onSelectStrikeCatalog={handleSelectStrikeCatalog}
+            onSelectPvoCatalog={handleSelectPvoCatalog}
+            onSelectInfraCatalog={handleSelectInfraCatalog}
+            onStartNavalShipPlacement={handleStartNavalShipPlacement}
+            onStartManualAirfieldPlacement={handleStartManualAirfieldPlacement}
+            onStartManualUaAirfieldPlacement={handleStartManualUaAirfieldPlacement}
+            onDeployPresetAirbase={handleDeployPresetAirbase}
+            selectedLauncher={selectedLauncher}
+            selectedSpec={selectedSpec}
+            onSelectLauncher={handleSelectLauncher}
+            onRemoveLauncher={handleRemoveLauncher}
+            selectedAirfield={selectedAirfield}
+            selectedAircraftSpec={selectedAircraftSpec}
+            selectedAircraftMissileSpec={selectedAircraftMissileSpec}
+            airfieldLaunchPoint={airfieldLaunchPoint}
+            airfieldMissileWaypoints={airfieldMissileWaypoints}
+            airfieldModalStep={airfieldModalStep}
+            onSetAirfieldModalStep={setAirfieldModalStep}
+            onSelectAirfield={handleSelectAirfield}
+            onChangeAirfieldAircraft={handleChangeAirfieldAircraft}
+            onChangeAirfieldSalvo={handleChangeAirfieldSalvo}
+            onRemoveAirfield={handleRemoveAirfield}
+            onLaunchAirfield={() => setLaunchAirfieldSignal((n) => n + 1)}
+            onUndoAirfieldWaypoint={() =>
+              setAirfieldMissileWaypoints((prev) => prev.slice(0, -1))
+            }
+            onResetAirfieldPoints={() => {
+              setAirfieldLaunchPoint(null);
+              setAirfieldMissileWaypoints([]);
+            }}
+            su57DropPoint={su57DropPoint}
+            onResetSu57DropPoint={() => setSu57DropPoint(null)}
+            isPlottingRoute={isPlottingRoute}
+            onSetIsPlottingRoute={setIsPlottingRoute}
+            routeWaypoints={routeWaypoints}
+            onUndoRouteWaypoint={() => setRouteWaypoints((prev) => prev.slice(0, -1))}
+            onClearRouteWaypoints={() => setRouteWaypoints([])}
+            effectiveRouteLaunchCount={effectiveRouteLaunchCount}
+            onChangeRouteLaunchCount={setRouteLaunchCount}
+            routeAltitudeMode={routeAltitudeMode}
+            onChangeRouteAltitudeMode={setRouteAltitudeMode}
+            onLaunchRoute={() => setLaunchRouteSignal((n) => n + 1)}
+            selectedFlight={selectedFlight}
+            followCamActive={followCamActive}
+            onExitFollowCam={() => setExitFollowCamSignal((n) => n + 1)}
+            onDetonateFlight={() => setDetonateFlightSignal((n) => n + 1)}
+            onDeselectFlight={() => {
+              if (followCamActive) {
+                setExitFollowCamSignal((n) => n + 1);
+              }
+              setFollowCamActive(false);
+              setSelectedFlight(null);
+              setIsPlottingFlightRoute(false);
+              setFlightRouteWaypoints([]);
+              setMobileSteerDir(0);
+            }}
+            isPlottingFlightRoute={isPlottingFlightRoute}
+            onSetIsPlottingFlightRoute={(v) => {
+              setIsPlottingFlightRoute(v);
+              if (!v) setFlightRouteWaypoints([]);
+            }}
+            flightRouteWaypoints={flightRouteWaypoints}
+            onUndoFlightRouteWaypoint={() =>
+              setFlightRouteWaypoints((prev) => prev.slice(0, -1))
+            }
+            onClearFlightRouteWaypoints={() => setFlightRouteWaypoints([])}
+            onApplyFlightRoute={() => setApplyFlightRouteSignal((n) => n + 1)}
+            onSetFlightAltitude={(id, mode) =>
+              setFlightAltitudeCommand((prev) => ({
+                id,
+                altitudeMode: mode,
+                seq: (prev?.seq ?? 0) + 1,
+              }))
+            }
+            onMobileSteerChange={setMobileSteerDir}
+            onFocusCoords={setFocusCoords}
+            onRemovePvo={handleRemovePvo}
+            onReloadPvo={handleReloadPvo}
+            onRepairPvo={handleRepairPvo}
+            onRemoveBuilding={handleRemoveBuilding}
+            buildingScale={buildingScale}
+            onChangeBuildingScale={setBuildingScale}
+            sirenEnabled={sirenEnabled}
+            onToggleSiren={() => setSirenEnabled((v) => !v)}
+            sirenVolume={sirenVolume}
+            onChangeSirenVolume={setSirenVolume}
+            droneVolume={droneVolume}
+            onChangeDroneVolume={setDroneVolume}
+            missileVolume={missileVolume}
+            onChangeMissileVolume={setMissileVolume}
+            alertHoldoverSec={alertHoldoverSec}
+            onChangeAlertHoldoverSec={setAlertHoldoverSec}
+            alertRadiusKm={alertRadiusKm}
+            onChangeAlertRadiusKm={setAlertRadiusKm}
+            telegramOpen={telegramOpen}
+            onSetTelegramOpen={setTelegramOpen}
+            telegramCountryFilter={telegramCountryFilter}
+            onChangeTelegramCountryFilter={setTelegramCountryFilter}
+            telegramUnreadUa={telegramUnreadUa}
+            telegramUnreadRu={telegramUnreadRu}
+            selectedTelegramOblast={selectedTelegramOblast}
+            onSelectTelegramOblast={setSelectedTelegramOblast}
+            onOpenTelegramChannel={handleOpenTelegramChannel}
+            telegramSearch={telegramSearch}
+            onChangeTelegramSearch={setTelegramSearch}
+            telegramPosts={telegramPosts}
+            telegramUnreadByOblast={telegramUnreadByOblast}
+            totalTelegramUnread={totalTelegramUnread}
+            onMarkAllTelegramRead={() => setTelegramUnreadByOblast({})}
+            onClearChannelPosts={(oblast) =>
+              setTelegramPosts((prev) => prev.filter((p) => p.oblast !== oblast))
+            }
+            eventLog={eventLog}
+            onClearEventLog={() => setEventLog([])}
+            warning={warning}
+          />
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen w-screen flex-col bg-[#070B12] text-slate-100 select-none overflow-hidden">
       {/* Top Command Bar */}
@@ -1400,7 +1824,10 @@ export default function App() {
         <div className="flex items-center gap-2 min-w-0">
           <button
             type="button"
-            onClick={() => setSidebarOpen((v) => !v)}
+            onClick={() => {
+              soundFx.playUiClick('toggle');
+              setSidebarOpen((v) => !v);
+            }}
             aria-label="Открыть панель вооружения"
             className="flex h-8 w-8 items-center justify-center rounded border border-slate-800 bg-[#0E1726] text-slate-300 hover:border-slate-700 hover:text-white transition-colors shrink-0 cursor-pointer"
           >
@@ -1409,7 +1836,10 @@ export default function App() {
 
           <button
             type="button"
-            onClick={handleReturnToMenu}
+            onClick={() => {
+              soundFx.playUiClick('back');
+              handleReturnToMenu();
+            }}
             className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 hover:text-white px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <span>Меню</span>
@@ -1419,9 +1849,9 @@ export default function App() {
             {gameMode === 'ai' ? 'Оборона против ИИ' : 'Оперативный штаб'}
           </h1>
 
-          {/* In-Game Clock (3 game min = 1 real sec) */}
+          {/* In-Game Clock (10 game min = 1 real sec, starting 23 Nov 2026) */}
           <div
-            title="Игровое время (3 игровых минуты = 1 секунда)"
+            title="Игровое время (10 игровых минут = 1 секунда)"
             className="hidden sm:flex items-center gap-1.5 border-l border-slate-800 pl-2.5 ml-1 text-xs font-mono-tabular text-slate-300 whitespace-nowrap shrink-0"
           >
             <Clock className="h-3.5 w-3.5 text-sky-400 shrink-0" />
@@ -1486,7 +1916,10 @@ export default function App() {
               <button
                 key={mult}
                 type="button"
-                onClick={() => setTimeScale(mult)}
+                onClick={() => {
+                  soundFx.playUiClick('tab');
+                  setTimeScale(mult);
+                }}
                 className={`px-2 py-0.5 text-[11px] font-mono-tabular font-semibold rounded-xs transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   timeScale === mult
                     ? 'bg-slate-700 text-white'
@@ -1500,7 +1933,10 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => setShowFrontline((v) => !v)}
+            onClick={() => {
+              soundFx.playUiClick('toggle');
+              setShowFrontline((v) => !v);
+            }}
             title="Линия фронта"
             className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showFrontline
@@ -1514,7 +1950,10 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => setShowRaions((v) => !v)}
+            onClick={() => {
+              soundFx.playUiClick('toggle');
+              setShowRaions((v) => !v);
+            }}
             title="Районы и воздушные тревоги"
             className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showRaions
@@ -1528,7 +1967,10 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => setShowLabels((v) => !v)}
+            onClick={() => {
+              soundFx.playUiClick('toggle');
+              setShowLabels((v) => !v);
+            }}
             className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showLabels
                 ? 'border-sky-500/55 bg-sky-500/10 text-sky-200'
@@ -1542,6 +1984,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              soundFx.playUiClick('tab');
               setSidebarOpen(true);
               setCatalogFilter((prev) => (prev === 'settings' ? (gameMode === 'ai' ? 'pvo' : 'all') : 'settings'));
             }}
@@ -1558,7 +2001,10 @@ export default function App() {
 
           <button
             type="button"
-            onClick={toggleMute}
+            onClick={() => {
+              soundFx.playUiClick('toggle');
+              toggleMute();
+            }}
             aria-label={muted ? 'Включить звук' : 'Выключить звук'}
             className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
@@ -1568,7 +2014,10 @@ export default function App() {
 
           <button
             type="button"
-            onClick={handleClearAll}
+            onClick={() => {
+              soundFx.playUiClick('back');
+              handleClearAll();
+            }}
             title={gameMode === 'ai' ? 'Начать заново' : 'Очистить карту'}
             className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-red-700 hover:text-red-200 px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
@@ -1579,6 +2028,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              soundFx.playUiClick('tap');
               setTelegramOpen((v) => {
                 const next = !v;
                 if (next) {
@@ -1609,6 +2059,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              soundFx.playUiClick('tab');
               setEventDrawerOpen((v) => {
                 const next = !v;
                 if (next) setTelegramOpen(false);
@@ -1665,7 +2116,10 @@ export default function App() {
                 <button
                   key={tab.id}
                   type="button"
-                  onClick={() => setCatalogFilter(tab.id)}
+                  onClick={() => {
+                    soundFx.playUiClick('tab');
+                    setCatalogFilter(tab.id);
+                  }}
                   className={`py-2.5 px-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
                     catalogFilter === tab.id
                       ? 'bg-[#121E32] text-white border-b-2 border-sky-400'
@@ -1734,7 +2188,10 @@ export default function App() {
                       type="button"
                       role="switch"
                       aria-checked={sirenEnabled}
-                      onClick={() => setSirenEnabled((v) => !v)}
+                      onClick={() => {
+                        soundFx.playUiClick('toggle');
+                        setSirenEnabled((v) => !v);
+                      }}
                       className={`relative inline-flex h-5 w-10 shrink-0 items-center rounded border transition-colors cursor-pointer ${
                         sirenEnabled
                           ? 'border-emerald-400/70 bg-emerald-500/80'
@@ -1903,7 +2360,10 @@ export default function App() {
                 <div className="border border-amber-500/40 rounded bg-[#080D16] overflow-hidden">
                   <button
                     type="button"
-                    onClick={() => setAirfieldMenuOpen((v) => !v)}
+                    onClick={() => {
+                      soundFx.playUiClick('toggle');
+                      setAirfieldMenuOpen((v) => !v);
+                    }}
                     className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-[#0E1726] transition-colors cursor-pointer"
                   >
                     <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-amber-500/35 shrink-0 overflow-hidden">
@@ -1959,7 +2419,10 @@ export default function App() {
                                   </span>
                                 </div>
                                 <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
-                                  {aircraft.shortName} · {aircraft.missileCount}× {missile.shortName}
+                                  {preset.availableAircraftIds
+                                    .map((id) => RUSSIAN_AIRCRAFT_BY_ID[id].shortName)
+                                    .join(' / ')}{' '}
+                                  · {aircraft.missileCount}× {missile.shortName}
                                 </div>
                               </div>
                               <span
@@ -1991,6 +2454,38 @@ export default function App() {
                   )}
                 </div>
 
+                {/* Naval Vessel in Black/Azov Sea for Kalibr Launches */}
+                <button
+                  type="button"
+                  onClick={handleStartNavalShipPlacement}
+                  className={`w-full flex items-center gap-3 rounded border p-2.5 text-left transition-colors cursor-pointer ${
+                    pendingShip
+                      ? 'border-sky-400 bg-sky-500/16'
+                      : 'border-sky-500/40 bg-[#080D16] hover:bg-[#0E1726]'
+                  }`}
+                >
+                  <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-sky-500/35 shrink-0 overflow-hidden">
+                    <ShipIcon className="w-14 h-10" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-sky-100 truncate">
+                        Корабль ВМФ РФ
+                      </span>
+                      <span
+                        className={`text-[11px] font-mono-tabular font-semibold whitespace-nowrap shrink-0 ${
+                          pendingShip ? 'text-sky-300' : 'text-amber-300'
+                        }`}
+                      >
+                        {pendingShip ? 'В море…' : '8× Калибр'}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-slate-400 truncate">
+                      КР «Калибр» · Ставится в Чёрном / Азовском море
+                    </div>
+                  </div>
+                </button>
+
                 <div>
                   <div className="flex items-baseline justify-between mb-2">
                     <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
@@ -2000,7 +2495,7 @@ export default function App() {
                   </div>
 
                   <div className="border border-slate-800 rounded divide-y divide-slate-800/80 overflow-hidden">
-                    {MUNITIONS.filter((m) => m.faction !== 'UA' && !m.airLaunchedOnly).map((item) => {
+                    {MUNITIONS.filter((m) => m.faction !== 'UA' && !m.airLaunchedOnly && !m.seaLaunchedOnly).map((item) => {
                       const isPending =
                         pendingPlacement?.kind === 'strike' && pendingPlacement.id === item.id;
                       return (
@@ -2048,15 +2543,15 @@ export default function App() {
                   </div>
                 </div>
 
-                <div>
-                  <div className="flex items-center justify-between mb-2 gap-2">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="flex h-3 w-1.5 flex-col overflow-hidden rounded-xs shrink-0" aria-hidden="true">
                         <span className="h-1.5 w-full bg-blue-500" />
                         <span className="h-1.5 w-full bg-yellow-400" />
                       </span>
                       <h2 className="text-xs font-semibold uppercase tracking-wider text-sky-200">
-                        ВСУ · БПЛА и ракеты
+                        ВСУ · Авиация, БПЛА и ракеты
                       </h2>
                     </div>
                     <span className="text-[11px] font-mono-tabular text-sky-400 whitespace-nowrap">
@@ -2064,8 +2559,106 @@ export default function App() {
                     </span>
                   </div>
 
+                  {/* Ukrainian Military Airfield Selector & Presets */}
+                  <div className="border border-sky-500/40 rounded bg-[#080D16] overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playUiClick('toggle');
+                        setUaAirfieldMenuOpen((v) => !v);
+                      }}
+                      className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-[#0E1726] transition-colors cursor-pointer"
+                    >
+                      <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-sky-500/35 shrink-0 overflow-hidden">
+                        <AirfieldIcon className="w-14 h-10" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm font-semibold text-sky-100 truncate">
+                            Аэродром ВСУ
+                          </span>
+                          <span className="text-[11px] font-mono-tabular text-sky-300 whitespace-nowrap shrink-0">
+                            {uaAirfieldMenuOpen ? 'Скрыть' : 'Открыть'}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-slate-400 truncate">
+                          Су-24М, F-16AM, МиГ-29 · Storm Shadow / AASM
+                        </div>
+                      </div>
+                    </button>
+
+                    {uaAirfieldMenuOpen && (
+                      <div className="border-t border-slate-800 p-2.5 space-y-2 bg-[#070B12]">
+                        <div className="text-[11px] font-medium text-slate-400">
+                          Куда поставить аэродром ВСУ:
+                        </div>
+                        <div className="border border-slate-800 rounded divide-y divide-slate-800/80">
+                          {UKRAINIAN_AIRBASE_PRESETS.map((preset) => {
+                            const isPlaced = airfields.some((a) => a.presetId === preset.id);
+                            const aircraft = RUSSIAN_AIRCRAFT_BY_ID[preset.defaultAircraftId];
+                            const missile = MUNITION_BY_ID[aircraft.missileId];
+                            return (
+                              <button
+                                key={preset.id}
+                                type="button"
+                                onClick={() => handleDeployPresetAirbase(preset)}
+                                className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors cursor-pointer ${
+                                  isPlaced
+                                    ? 'bg-sky-500/14'
+                                    : 'bg-[#0A111C] hover:bg-[#0E1726]'
+                                }`}
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <Plane
+                                      className="h-3 w-3 shrink-0"
+                                      style={{ color: aircraft.accentColor }}
+                                    />
+                                    <span className="text-xs font-semibold text-slate-100 truncate">
+                                      {preset.name}
+                                    </span>
+                                    <span className="text-[10px] text-slate-500 truncate">
+                                      ({preset.region})
+                                    </span>
+                                  </div>
+                                  <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
+                                    {preset.availableAircraftIds
+                                      .map((id) => RUSSIAN_AIRCRAFT_BY_ID[id].shortName)
+                                      .join(' / ')}{' '}
+                                    · {aircraft.missileCount}× {missile.shortName}
+                                  </div>
+                                </div>
+                                <span
+                                  className={`text-[10.5px] font-mono-tabular font-semibold whitespace-nowrap shrink-0 ${
+                                    isPlaced ? 'text-sky-300' : 'text-blue-300'
+                                  }`}
+                                >
+                                  {isPlaced ? 'Перейти' : 'Поставить'}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleStartManualUaAirfieldPlacement}
+                          className={`w-full rounded border px-2.5 py-2 text-xs font-semibold transition-colors cursor-pointer ${
+                            pendingAirfieldUa
+                              ? 'border-sky-400 bg-sky-500/20 text-sky-200'
+                              : 'border-slate-700 bg-[#0E1726] hover:border-sky-500/50 text-slate-200'
+                          }`}
+                        >
+                          {pendingAirfieldUa
+                            ? 'Нажмите на подконтрольную Украину…'
+                            : '+ Поставить свой аэродром ВСУ'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="border border-slate-800 rounded divide-y divide-slate-800/80 overflow-hidden">
-                    {MUNITIONS.filter((m) => m.faction === 'UA').map((item) => {
+                    {MUNITIONS.filter((m) => m.faction === 'UA' && !m.airLaunchedOnly).map((item) => {
                       const isPending =
                         pendingPlacement?.kind === 'strike' && pendingPlacement.id === item.id;
                       return (
@@ -2170,7 +2763,7 @@ export default function App() {
                           <div className="mt-0.5 text-[10.5px] text-slate-500 truncate">
                             {pvo.isRadar
                               ? 'Скрытые цели · +45% дальности ППО'
-                              : `Б/К ${pvo.maxAmmo} ${pvo.isGun ? 'очередей' : 'ракет'} · КД ${pvo.cooldownSec} с`}
+                              : `Б/К ${pvo.maxAmmo} ${pvo.id === 'mg-pickup' ? 'патр.' : pvo.isGun ? 'очередей' : 'ракет'} · КД ${pvo.cooldownSec} с`}
                           </div>
                         </div>
                       </button>
@@ -2309,13 +2902,18 @@ export default function App() {
                       const acSpec = RUSSIAN_AIRCRAFT_BY_ID[af.selectedAircraftId];
                       const missileSpec = MUNITION_BY_ID[acSpec.missileId];
                       const isSelected = selectedAirfieldId === af.id;
+                      const isUa = af.faction === 'UA';
                       const territory = getTerritoryAt(af.lat, af.lng);
                       const occupied = territory === 'UA' && isPointInOccupiedTerritory(af.lat, af.lng);
                       return (
                         <div
                           key={af.id}
                           className={`flex items-center justify-between gap-2 px-2.5 py-2 transition-colors ${
-                            isSelected ? 'bg-amber-500/12' : 'hover:bg-[#0D1624]'
+                            isSelected
+                              ? isUa
+                                ? 'bg-sky-500/14'
+                                : 'bg-amber-500/12'
+                              : 'hover:bg-[#0D1624]'
                           }`}
                         >
                           <button
@@ -2336,7 +2934,11 @@ export default function App() {
                                 <span className="text-xs font-semibold text-slate-100 truncate">
                                   {af.name}
                                 </span>
-                                <span className="font-mono-tabular text-[10.5px] font-semibold text-amber-300 shrink-0">
+                                <span
+                                  className={`font-mono-tabular text-[10.5px] font-semibold shrink-0 ${
+                                    isUa ? 'text-sky-300' : 'text-amber-300'
+                                  }`}
+                                >
                                   {af.salvoCount}× {missileSpec.shortName}
                                 </span>
                               </div>
@@ -2387,7 +2989,9 @@ export default function App() {
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-xs font-semibold text-slate-100 truncate">
-                                  ПУ #{idx + 1} · {spec.shortName}
+                                  {l.isNavalShip
+                                    ? `Корабль #${idx + 1} · ${spec.shortName}`
+                                    : `ПУ #${idx + 1} · ${spec.shortName}`}
                                 </span>
                                 <span
                                   className={`font-mono-tabular text-[11px] font-semibold shrink-0 ${
@@ -2410,7 +3014,14 @@ export default function App() {
                                 ))}
                               </div>
                               <div className="mt-1 font-mono-tabular text-[10px] text-slate-400 truncate">
-                                {occupied ? 'Оккуп. терр.' : territory === 'UA' ? 'Украина' : 'Россия'} ·{' '}
+                                {l.isNavalShip
+                                  ? 'Море (Чёрное/Азовское)'
+                                  : occupied
+                                    ? 'Оккуп. терр.'
+                                    : territory === 'UA'
+                                      ? 'Украина'
+                                      : 'Россия'}{' '}
+                                ·{' '}
                                 {l.ammo > 0
                                   ? `${l.lat.toFixed(2)}, ${l.lng.toFixed(2)}`
                                   : l.munitionId === 'airstrike'
@@ -2643,6 +3254,7 @@ export default function App() {
             focusCoords={focusCoords}
             onChangeMapStyle={setMapStyle}
             onPlaceStrikeLauncher={handlePlaceStrikeLauncher}
+            onPlaceNavalShip={handlePlaceNavalShip}
             onPlaceAirfield={handlePlaceAirfield}
             onPlaceAirDefense={handlePlaceAirDefense}
             onPlaceBuilding={handlePlaceBuilding}
@@ -2681,14 +3293,49 @@ export default function App() {
           {/* Floating Command Bar */}
           <div className="pointer-events-none absolute top-3 left-3 right-3 z-20 flex justify-center">
             <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded border border-slate-700 bg-[#0A111C]/96 px-3 py-1.5 text-xs text-slate-200 max-w-4xl">
-              {pendingAirfield ? (
+              {pendingShip ? (
+                <>
+                  <span className="font-medium">
+                    Установка <strong className="text-sky-300">корабля ВМФ РФ</strong> (8× КР «Калибр») — нажмите на Чёрное или Азовское море
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playUiClick('back');
+                      setPendingPlacement(null);
+                    }}
+                    className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Отмена
+                  </button>
+                </>
+              ) : pendingAirfield ? (
                 <>
                   <span className="font-medium">
                     Установка <strong className="text-amber-300">аэродрома ВКС РФ</strong> — нажмите на территорию РФ или оккуп. зону
                   </span>
                   <button
                     type="button"
-                    onClick={() => setPendingPlacement(null)}
+                    onClick={() => {
+                      soundFx.playUiClick('back');
+                      setPendingPlacement(null);
+                    }}
+                    className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Отмена
+                  </button>
+                </>
+              ) : pendingAirfieldUa ? (
+                <>
+                  <span className="font-medium">
+                    Установка <strong className="text-sky-300">аэродрома ВСУ</strong> — нажмите на подконтрольную территорию Украины
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playUiClick('back');
+                      setPendingPlacement(null);
+                    }}
                     className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     Отмена
@@ -2765,15 +3412,72 @@ export default function App() {
                     ? RUSSIAN_AIRCRAFT_BY_ID[selectedFlight.carrierAircraftId].accentColor
                     : MUNITION_BY_ID[selectedFlight.munitionId].accentColor;
                   const fltSpec = MUNITION_BY_ID[selectedFlight.munitionId];
+                  const isAiReadOnly = gameMode === 'ai' && Boolean(selectedFlight.isAiStrike);
                   const isSteerable =
-                    !selectedFlight.carrierAircraftId && fltSpec.profile !== 'airstrike';
-                  const canAdjustAlt = Boolean(!selectedFlight.carrierAircraftId && fltSpec.canFlyLow);
+                    !isAiReadOnly &&
+                    !selectedFlight.carrierAircraftId &&
+                    fltSpec.profile !== 'airstrike';
+                  const canAdjustAlt = Boolean(
+                    !isAiReadOnly && !selectedFlight.carrierAircraftId && fltSpec.canFlyLow,
+                  );
+                  const obsHeightLabel =
+                    selectedFlight.altitudeMode === 'ultra-low'
+                      ? 'Очень низко (вне РЛС)'
+                      : selectedFlight.altitudeMode === 'low'
+                        ? 'Низко (РЛС)'
+                        : 'Обычная';
                   const altLabel =
                     selectedFlight.altitudeMode === 'ultra-low'
                       ? ' · Очень низко (вне РЛС)'
                       : selectedFlight.altitudeMode === 'low'
                         ? ' · Низко (РЛС)'
                         : '';
+                  if (isAiReadOnly) {
+                    return (
+                      <>
+                        <span className="font-medium flex items-center gap-1.5">
+                          <Eye className="h-3.5 w-3.5 text-sky-300 shrink-0" />
+                          <span>
+                            Наблюдение ИИ:{' '}
+                            <strong style={{ color: fltAccent }}>{fltName}</strong>{' '}
+                            <span className="font-mono-tabular text-slate-300">
+                              (~{Math.round(selectedFlight.remainingKm)} км · Высота: {obsHeightLabel})
+                            </span>
+                          </span>
+                        </span>
+
+                        {followCamActive && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              soundFx.playUiClick('back');
+                              setExitFollowCamSignal((n) => n + 1);
+                            }}
+                            className="rounded border border-sky-400/60 bg-sky-500/15 hover:bg-sky-500/25 px-2.5 py-1 text-[11px] font-semibold text-sky-200 whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            Выйти из камеры
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            soundFx.playUiClick('back');
+                            if (followCamActive) {
+                              setExitFollowCamSignal((n) => n + 1);
+                            }
+                            setFollowCamActive(false);
+                            setSelectedFlight(null);
+                            setIsPlottingFlightRoute(false);
+                            setFlightRouteWaypoints([]);
+                          }}
+                          className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          Снять выбор
+                        </button>
+                      </>
+                    );
+                  }
                   return isPlottingFlightRoute ? (
                     <>
                       <span className="font-medium flex items-center gap-1.5">
@@ -2789,7 +3493,10 @@ export default function App() {
                       <button
                         type="button"
                         disabled={flightRouteWaypoints.length === 0}
-                        onClick={() => setApplyFlightRouteSignal((n) => n + 1)}
+                        onClick={() => {
+                          soundFx.playUiClick('confirm');
+                          setApplyFlightRouteSignal((n) => n + 1);
+                        }}
                         className="flex items-center gap-1 rounded bg-amber-500 hover:bg-amber-400 disabled:opacity-45 disabled:pointer-events-none px-2.5 py-1 text-[11px] font-semibold text-slate-950 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Play className="h-3 w-3" />
@@ -2799,7 +3506,10 @@ export default function App() {
                       <button
                         type="button"
                         disabled={flightRouteWaypoints.length === 0}
-                        onClick={() => setFlightRouteWaypoints((prev) => prev.slice(0, -1))}
+                        onClick={() => {
+                          soundFx.playUiClick('back');
+                          setFlightRouteWaypoints((prev) => prev.slice(0, -1));
+                        }}
                         className="flex items-center gap-1 rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 disabled:opacity-40 disabled:pointer-events-none px-2 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Undo2 className="h-3 w-3" />
@@ -2809,6 +3519,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => {
+                          soundFx.playUiClick('back');
                           setIsPlottingFlightRoute(false);
                           setFlightRouteWaypoints([]);
                         }}
@@ -2884,7 +3595,10 @@ export default function App() {
                       {followCamActive && (
                         <button
                           type="button"
-                          onClick={() => setExitFollowCamSignal((n) => n + 1)}
+                          onClick={() => {
+                            soundFx.playUiClick('back');
+                            setExitFollowCamSignal((n) => n + 1);
+                          }}
                           className="rounded border border-sky-400/60 bg-sky-500/15 hover:bg-sky-500/25 px-2.5 py-1 text-[11px] font-semibold text-sky-200 whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           Выйти из камеры
@@ -2904,6 +3618,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => {
+                          soundFx.playUiClick('tap');
                           setIsPlottingFlightRoute(true);
                           setFlightRouteWaypoints([]);
                         }}
@@ -2916,6 +3631,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => {
+                          soundFx.playUiClick('back');
                           if (followCamActive) {
                             setExitFollowCamSignal((n) => n + 1);
                           }
@@ -3178,7 +3894,11 @@ export default function App() {
               ) : selectedAirfield && selectedAircraftSpec && selectedAircraftMissileSpec ? (
                 <>
                   <span className="font-medium">
-                    Аэродром <strong className="text-amber-300">{selectedAirfield.name}</strong> ·{' '}
+                    {selectedAirfield.faction === 'UA' ? 'Аэродром ВСУ' : 'Аэродром'}{' '}
+                    <strong className={selectedAirfield.faction === 'UA' ? 'text-sky-300' : 'text-amber-300'}>
+                      {selectedAirfield.name}
+                    </strong>{' '}
+                    ·{' '}
                     <strong style={{ color: selectedAircraftSpec.accentColor }}>
                       {selectedAircraftSpec.shortName}
                     </strong>{' '}
@@ -3285,13 +4005,17 @@ export default function App() {
                 >
                   <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-3 bg-[#080D16]">
                     <div className="min-w-0">
-                      <div className="text-[11px] font-mono-tabular font-medium text-amber-300 truncate">
-                        Аэродром «{selectedAirfield.name}»
+                      <div
+                        className={`text-[11px] font-mono-tabular font-medium truncate ${
+                          selectedAirfield.faction === 'UA' ? 'text-sky-300' : 'text-amber-300'
+                        }`}
+                      >
+                        {selectedAirfield.faction === 'UA' ? 'Аэродром ВСУ' : 'Аэродром'} «{selectedAirfield.name}»
                       </div>
                       <h3 className="text-sm font-semibold text-slate-100 truncate">
                         {airfieldModalStep === 'aircraft'
                           ? 'Выберите самолёт'
-                          : `${selectedAircraftSpec.name} — Сколько ракет?`}
+                          : `${selectedAircraftSpec.name} — Сколько ${selectedAircraftSpec.missileId === 'aasm-hammer' ? 'бомб' : 'ракет'}?`}
                       </h3>
                     </div>
 
@@ -3318,9 +4042,18 @@ export default function App() {
 
                   {airfieldModalStep === 'aircraft' ? (
                     <div className="tac-scroll border-t border-slate-800 divide-y divide-slate-800 max-h-[68vh] overflow-y-auto">
-                      {RUSSIAN_AIRCRAFT.map((ac) => {
+                      {(selectedAirfield.availableAircraftIds &&
+                      selectedAirfield.availableAircraftIds.length > 0
+                        ? ALL_AIRCRAFT.filter((ac) =>
+                            selectedAirfield.availableAircraftIds!.includes(ac.id),
+                          )
+                        : ALL_AIRCRAFT.filter(
+                            (ac) => ac.faction === (selectedAirfield.faction ?? 'RU'),
+                          )
+                      ).map((ac) => {
                         const mSpec = MUNITION_BY_ID[ac.missileId];
                         const isCurrent = selectedAirfield.selectedAircraftId === ac.id;
+                        const isUa = selectedAirfield.faction === 'UA';
                         return (
                           <button
                             key={ac.id}
@@ -3328,7 +4061,9 @@ export default function App() {
                             onClick={() => handleChangeAirfieldAircraft(selectedAirfield.id, ac.id)}
                             className={`w-full flex items-center gap-3 p-3 text-left transition-colors cursor-pointer ${
                               isCurrent
-                                ? 'bg-amber-500/14'
+                                ? isUa
+                                  ? 'bg-sky-500/16'
+                                  : 'bg-amber-500/14'
                                 : 'bg-[#0A111C] hover:bg-[#0E1726]'
                             }`}
                           >
@@ -3340,7 +4075,11 @@ export default function App() {
                                 <span className="text-sm font-semibold text-slate-100 truncate">
                                   {ac.name}
                                 </span>
-                                <span className="font-mono-tabular text-[11px] font-semibold text-amber-300 shrink-0">
+                                <span
+                                  className={`font-mono-tabular text-[11px] font-semibold shrink-0 ${
+                                    isUa ? 'text-sky-300' : 'text-amber-300'
+                                  }`}
+                                >
                                   до {ac.missileCount}× {mSpec.shortName}
                                 </span>
                               </div>
@@ -3367,12 +4106,15 @@ export default function App() {
                           </div>
                           <div className="mt-0.5 text-[11px] font-mono-tabular text-slate-400">
                             -{selectedAircraftMissileSpec.damage} HP · {selectedAircraftMissileSpec.realSpeedKmh} км/ч
+                            {selectedAircraftMissileSpec.kabMaxRangeKm
+                              ? ` · ≤${selectedAircraftMissileSpec.kabMaxRangeKm} км`
+                              : ''}
                           </div>
                         </div>
                       </div>
 
                       <div className="text-xs font-medium text-slate-300">
-                        Количество ракет в залпе:
+                        Количество в залпе:
                       </div>
 
                       <div className="grid grid-cols-2 gap-2">
@@ -3380,10 +4122,21 @@ export default function App() {
                           { length: selectedAircraftSpec.missileCount },
                           (_, idx) => idx + 1,
                         ).map((count) => {
-                          const missileWord =
-                            count === 1 ? 'ракета' : count >= 2 && count <= 4 ? 'ракеты' : 'ракет';
+                          const isBomb = selectedAircraftMissileSpec.id === 'aasm-hammer';
+                          const missileWord = isBomb
+                            ? count === 1
+                              ? 'бомба'
+                              : count >= 2 && count <= 4
+                                ? 'бомбы'
+                                : 'бомб'
+                            : count === 1
+                              ? 'ракета'
+                              : count >= 2 && count <= 4
+                                ? 'ракеты'
+                                : 'ракет';
                           const totalDmg = count * selectedAircraftMissileSpec.damage;
                           const isSelectedCount = selectedAirfield.salvoCount === count;
+                          const isUa = selectedAirfield.faction === 'UA';
                           return (
                             <button
                               key={count}
@@ -3394,12 +4147,20 @@ export default function App() {
                               }}
                               className={`flex flex-col items-start rounded border px-3 py-2 text-left transition-colors cursor-pointer ${
                                 isSelectedCount
-                                  ? 'border-amber-400 bg-amber-500/18 text-white'
-                                  : 'border-slate-800 bg-[#080D16] text-slate-200 hover:border-amber-400/70 hover:bg-[#0E1726]'
+                                  ? isUa
+                                    ? 'border-sky-400 bg-sky-500/18 text-white'
+                                    : 'border-amber-400 bg-amber-500/18 text-white'
+                                  : isUa
+                                    ? 'border-slate-800 bg-[#080D16] text-slate-200 hover:border-sky-400/70 hover:bg-[#0E1726]'
+                                    : 'border-slate-800 bg-[#080D16] text-slate-200 hover:border-amber-400/70 hover:bg-[#0E1726]'
                               }`}
                             >
                               <div className="flex items-center justify-between w-full">
-                                <span className="text-sm font-bold font-mono-tabular text-amber-300">
+                                <span
+                                  className={`text-sm font-bold font-mono-tabular ${
+                                    isUa ? 'text-sky-300' : 'text-amber-300'
+                                  }`}
+                                >
                                   {count} {missileWord}
                                 </span>
                                 <span className="text-[10.5px] font-mono-tabular text-slate-400">
@@ -3432,7 +4193,10 @@ export default function App() {
 
                 <button
                   type="button"
-                  onClick={() => setEventDrawerOpen(false)}
+                  onClick={() => {
+                    soundFx.playUiClick('back');
+                    setEventDrawerOpen(false);
+                  }}
                   aria-label="Закрыть панель статистики"
                   className="flex h-7 w-7 items-center justify-center rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 text-slate-300 cursor-pointer shrink-0"
                 >
@@ -3444,7 +4208,10 @@ export default function App() {
               <div className="grid grid-cols-2 border-b border-slate-800 bg-[#080D16] divide-x divide-slate-800 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setDrawerTab('stats')}
+                  onClick={() => {
+                    soundFx.playUiClick('tab');
+                    setDrawerTab('stats');
+                  }}
                   className={`flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
                     drawerTab === 'stats'
                       ? 'bg-[#121E32] text-white border-b-2 border-sky-400'
@@ -3456,7 +4223,10 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setDrawerTab('log')}
+                  onClick={() => {
+                    soundFx.playUiClick('tab');
+                    setDrawerTab('log');
+                  }}
                   className={`flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
                     drawerTab === 'log'
                       ? 'bg-[#121E32] text-white border-b-2 border-sky-400'
@@ -3481,7 +4251,7 @@ export default function App() {
                         {formatSimClock(simTimeMinutes)}
                       </div>
                       <div className="text-[10.5px] text-slate-500">
-                        3 мин/с · {timeScale}×
+                        10 мин/с · {timeScale}×
                       </div>
                     </div>
                   </div>
@@ -3679,7 +4449,10 @@ export default function App() {
                   <BatteryFull className="h-3.5 w-3.5 text-emerald-400" />
                   <button
                     type="button"
-                    onClick={() => setTelegramOpen(false)}
+                    onClick={() => {
+                      soundFx.playUiClick('back');
+                      setTelegramOpen(false);
+                    }}
                     aria-label="Закрыть телефон"
                     className="ml-1 flex h-5 w-5 items-center justify-center rounded border border-slate-700 bg-[#17212B] hover:border-slate-500 text-slate-300 cursor-pointer"
                   >
@@ -3701,7 +4474,10 @@ export default function App() {
                     <div className="font-display text-4xl font-bold tracking-tight text-white">
                       {formatSimTimeShort(simTimeMinutes)}
                     </div>
-                    <div className="mt-1 text-xs text-slate-400">
+                    <div className="mt-1 text-[11px] font-mono-tabular text-sky-300/90">
+                      {formatSimDateShort(simTimeMinutes)}
+                    </div>
+                    <div className="mt-0.5 text-xs text-slate-400">
                       {stats.missileAlertRaions > 0
                         ? `Ракетная угроза · ${stats.missileAlertRaions} р-н`
                         : stats.droneAlertRaions > 0
@@ -3713,7 +4489,10 @@ export default function App() {
                   <div className="grid grid-cols-3 gap-4 my-auto py-4">
                     <button
                       type="button"
-                      onClick={() => setPhoneScreen('telegram')}
+                      onClick={() => {
+                        soundFx.playUiClick('tap');
+                        setPhoneScreen('telegram');
+                      }}
                       className="flex flex-col items-center gap-1.5 group cursor-pointer"
                     >
                       <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl bg-[#24A1DE] group-hover:bg-[#2AABEE] transition-colors">
@@ -3732,6 +4511,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
+                        soundFx.playUiClick('tab');
                         setTelegramOpen(false);
                         setEventDrawerOpen(true);
                       }}
@@ -3746,6 +4526,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
+                        soundFx.playUiClick('tap');
                         setPhoneScreen('telegram');
                         setSelectedTelegramOblast(null);
                       }}
@@ -3770,7 +4551,10 @@ export default function App() {
                     <div className="flex items-center gap-2 min-w-0">
                       <button
                         type="button"
-                        onClick={() => setSelectedTelegramOblast(null)}
+                        onClick={() => {
+                          soundFx.playUiClick('back');
+                          setSelectedTelegramOblast(null);
+                        }}
                         aria-label="Назад к чатам"
                         className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-[#232E3C] text-slate-200 shrink-0 cursor-pointer"
                       >
@@ -3870,6 +4654,15 @@ export default function App() {
                                         ? 'Тревога: Ракетная'
                                         : 'Тревога: Угроза БПЛА'}
                                 </span>
+                              ) : post.eventKind === 'intercepted' ? (
+                                <span className="truncate font-semibold text-emerald-300">
+                                  {activeTelegramChannel.country === 'RU' ? 'Сбито ПВО' : 'Сбито ППО'}:{' '}
+                                  {post.nearCity ?? post.raionName ?? post.oblast}
+                                </span>
+                              ) : post.eventKind === 'dorozvedka' ? (
+                                <span className="truncate font-semibold text-sky-300">
+                                  Дорозведка: {formatOblastShortLabel(post.oblast)}
+                                </span>
                               ) : post.eventKind === 'explosion' ? (
                                 <span className="truncate font-semibold text-orange-300">
                                   Взрыв: {post.nearCity ?? post.raionName ?? post.oblast}
@@ -3937,13 +4730,70 @@ export default function App() {
                       )}
                     </div>
 
+                    <div className="grid grid-cols-2 rounded-lg bg-[#0E1621] p-0.5 border border-[#242F3D]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          soundFx.playUiClick('tab');
+                          setTelegramCountryFilter('UA');
+                        }}
+                        className={`flex items-center justify-center gap-1.5 rounded-md py-1 text-[11px] font-semibold transition-colors cursor-pointer ${
+                          telegramCountryFilter === 'UA'
+                            ? 'bg-[#24A1DE] text-slate-950'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <span>Украина</span>
+                        {telegramUnreadUa > 0 && (
+                          <span
+                            className={`rounded px-1 font-mono-tabular text-[9.5px] font-bold ${
+                              telegramCountryFilter === 'UA'
+                                ? 'bg-slate-950/25 text-slate-950'
+                                : 'bg-[#2AABEE] text-slate-950'
+                            }`}
+                          >
+                            {telegramUnreadUa}
+                          </span>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          soundFx.playUiClick('tab');
+                          setTelegramCountryFilter('RU');
+                        }}
+                        className={`flex items-center justify-center gap-1.5 rounded-md py-1 text-[11px] font-semibold transition-colors cursor-pointer ${
+                          telegramCountryFilter === 'RU'
+                            ? 'bg-[#24A1DE] text-slate-950'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <span>Россия</span>
+                        {telegramUnreadRu > 0 && (
+                          <span
+                            className={`rounded px-1 font-mono-tabular text-[9.5px] font-bold ${
+                              telegramCountryFilter === 'RU'
+                                ? 'bg-slate-950/25 text-slate-950'
+                                : 'bg-[#2AABEE] text-slate-950'
+                            }`}
+                          >
+                            {telegramUnreadRu}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+
                     <div className="relative">
                       <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
                       <input
                         type="text"
                         value={telegramSearch}
                         onChange={(e) => setTelegramSearch(e.target.value)}
-                        placeholder="Поиск каналов..."
+                        placeholder={
+                          telegramCountryFilter === 'RU'
+                            ? 'Поиск каналов РФ...'
+                            : 'Поиск каналов Украины...'
+                        }
                         className="w-full rounded-lg bg-[#242F3D] pl-8 pr-2.5 py-1.5 text-[11px] text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#24A1DE]"
                       />
                     </div>
@@ -3957,7 +4807,10 @@ export default function App() {
                         <button
                           key={ch.oblast}
                           type="button"
-                          onClick={() => handleOpenTelegramChannel(ch.oblast)}
+                          onClick={() => {
+                            soundFx.playUiClick('tap');
+                            handleOpenTelegramChannel(ch.oblast);
+                          }}
                           className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[#202B36] cursor-pointer"
                         >
                           <img
@@ -4003,7 +4856,10 @@ export default function App() {
               <div className="flex items-center justify-center bg-[#0B1018] py-1.5 border-t border-slate-800/80 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setPhoneScreen((s) => (s === 'home' ? 'telegram' : 'home'))}
+                  onClick={() => {
+                    soundFx.playUiClick('tap');
+                    setPhoneScreen((s) => (s === 'home' ? 'telegram' : 'home'));
+                  }}
                   title={phoneScreen === 'home' ? 'Открыть Telegram' : 'На рабочий стол телефона'}
                   className="h-1 w-20 rounded-full bg-slate-500 hover:bg-slate-300 transition-colors cursor-pointer"
                 />

@@ -1,6 +1,7 @@
 export type MunitionId =
   | 'shahed-136'
   | 'shahed-238'
+  | 'banderol'
   | 'kalibr'
   | 'iskander'
   | 'kh101'
@@ -16,7 +17,9 @@ export type MunitionId =
   | 'flamingo'
   | 'kinzhal'
   | 'kh22'
-  | 'kh69';
+  | 'kh69'
+  | 'storm-shadow'
+  | 'aasm-hammer';
 
 export type AirDefenseId = 'patriot' | 'iris-t' | 'gepard' | 's300' | 'mg-pickup' | 'radar';
 
@@ -48,6 +51,7 @@ export interface MunitionSpec {
   faction: 'RU' | 'UA';
   allowedTerritory?: 'UA' | 'RU';
   airLaunchedOnly?: boolean;
+  seaLaunchedOnly?: boolean;
   canFlyLow?: boolean;
   realSpeedKmh: number;
   simSpeedKmPerSec: number;
@@ -130,21 +134,40 @@ export const MUNITIONS: MunitionSpec[] = [
     summary: 'Чёрный стелс-корпус, реактивный ТРД, маловысотный прорыв',
   },
   {
+    id: 'banderol',
+    name: 'С-8000 «Бандероль»',
+    shortName: 'Бандероль',
+    category: 'Реактивная КР / БПЛА',
+    launcherName: 'Пусковая установка С-8000',
+    profile: 'cruise',
+    faction: 'RU',
+    canFlyLow: true,
+    realSpeedKmh: 620,
+    simSpeedKmPerSec: 23,
+    maxAmmo: 4,
+    damage: 38,
+    blastRadiusKm: 11,
+    accentColor: '#FB7185',
+    exhaustColor: '#FDE047',
+    summary: 'Малозаметная реактивная крылатая ракета/БПЛА С-8000 «Бандероль» со складным крылом',
+  },
+  {
     id: 'kalibr',
     name: 'Калибр 3М-14',
     shortName: 'Калибр',
-    category: 'Крылатая ракета',
-    launcherName: 'Контейнерная ПУ «Калибр-К»',
+    category: 'Крылатая ракета (ВМФ)',
+    launcherName: 'Корабль ВМФ РФ (УКСК «Калибр»)',
     profile: 'cruise',
     faction: 'RU',
+    seaLaunchedOnly: true,
     realSpeedKmh: 880,
     simSpeedKmPerSec: 30,
-    maxAmmo: 4,
+    maxAmmo: 8,
     damage: 50,
     blastRadiusKm: 15,
     accentColor: '#38BDF8',
     exhaustColor: '#F97316',
-    summary: 'Дозвуковая КР со складным крылом',
+    summary: 'Дозвуковая КР морского базирования — запускается только с кораблей в море',
   },
   {
     id: 'iskander',
@@ -167,10 +190,11 @@ export const MUNITIONS: MunitionSpec[] = [
     id: 'kh101',
     name: 'Ракета Х-101',
     shortName: 'Х-101',
-    category: 'Стратегическая КР',
-    launcherName: 'Пусковая платформа Х-101',
+    category: 'Стратегическая КР (ВКС)',
+    launcherName: 'Ту-95МС / Ту-160 (воздушный старт)',
     profile: 'cruise',
     faction: 'RU',
+    airLaunchedOnly: true,
     realSpeedKmh: 960,
     simSpeedKmPerSec: 33,
     maxAmmo: 4,
@@ -178,7 +202,7 @@ export const MUNITIONS: MunitionSpec[] = [
     blastRadiusKm: 16,
     accentColor: '#A78BFA',
     exhaustColor: '#FB923C',
-    summary: 'Малозаметный гранёный корпус, большое крыло',
+    summary: 'Малозаметная гранёная КР воздушного старта с бортов Ту-95МС / Ту-160',
   },
   {
     id: 'neptune',
@@ -413,6 +437,48 @@ export const MUNITIONS: MunitionSpec[] = [
     exhaustColor: '#60A5FA',
     summary: 'Новейшая малозаметная квадратная КР воздушного старта с Су-57',
   },
+  {
+    id: 'storm-shadow',
+    name: 'Storm Shadow / SCALP',
+    shortName: 'Storm Shadow',
+    category: 'Крылатая ракета',
+    launcherName: 'Су-24М / F-16AM',
+    profile: 'cruise',
+    faction: 'UA',
+    allowedTerritory: 'UA',
+    airLaunchedOnly: true,
+    canFlyLow: true,
+    realSpeedKmh: 1000,
+    simSpeedKmPerSec: 34,
+    maxAmmo: 2,
+    damage: 70,
+    blastRadiusKm: 15,
+    accentColor: '#38BDF8',
+    exhaustColor: '#60A5FA',
+    summary: 'Авиационная малозаметная КР дальнего действия (пуск с Су-24М и F-16AM)',
+  },
+  {
+    id: 'aasm-hammer',
+    name: 'УАБ AASM Hammer',
+    shortName: 'AASM Hammer',
+    category: 'Планирующая УАБ',
+    launcherName: 'МиГ-29 / F-16AM',
+    profile: 'kab',
+    faction: 'UA',
+    allowedTerritory: 'UA',
+    airLaunchedOnly: true,
+    canFlyLow: false,
+    realSpeedKmh: 920,
+    simSpeedKmPerSec: 27,
+    maxAmmo: 2,
+    damage: 55,
+    blastRadiusKm: 11,
+    maxRangeKm: 75,
+    kabMaxRangeKm: 75,
+    accentColor: '#60A5FA',
+    exhaustColor: '#93C5FD',
+    summary: 'Корректируемая авиабомба с ускорителем (дальность сброса до 75 км)',
+  },
 ];
 
 export const AIR_DEFENSE_SYSTEMS: AirDefenseSpec[] = [
@@ -422,15 +488,15 @@ export const AIR_DEFENSE_SYSTEMS: AirDefenseSpec[] = [
     shortName: 'Пулемёт МВГ',
     category: 'ППО · Пикап + турель',
     rangeKm: 32,
-    maxAmmo: 15,
+    maxAmmo: 180,
     maxHp: 35,
     cost: 150,
     interceptorSpeedKmPerSec: 130,
-    cooldownSec: 0.32,
+    cooldownSec: 3.4,
     isGun: true,
     isMobile: false,
     accentColor: '#84CC16',
-    summary: 'Стационарный пикап с вращающейся турелью: 15 патронов и быстрая КД против БПЛА',
+    summary: 'Стационарный пикап с турелью: стреляет по 1 пуле очередями по 18 патр. (180 патр., перезарядка 3.4 с)',
   },
   {
     id: 'gepard',

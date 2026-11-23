@@ -5,6 +5,7 @@ import {
   getBuildingSpriteDataUrl,
   getLauncherSpriteDataUrl,
   getPvoSpriteDataUrl,
+  getShipSpriteDataUrl,
 } from '../utils/realisticSprites';
 
 interface MunitionIconProps {
@@ -90,6 +91,21 @@ export function RussianAircraftIcon({
   className?: string;
 }) {
   const src = getAircraftSpriteDataUrl(id);
+  if (!src) return null;
+  return (
+    <img
+      src={src}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+      referrerPolicy="no-referrer"
+      className={`${className} object-contain select-none pointer-events-none`}
+    />
+  );
+}
+
+export function ShipIcon({ className = 'w-14 h-10' }: { className?: string }) {
+  const src = getShipSpriteDataUrl();
   if (!src) return null;
   return (
     <img

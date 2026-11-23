@@ -168,7 +168,10 @@ const WESTERN_UA_EXCLUDED_OBLASTS: ReadonlySet<string> = new Set([
   'Закарпатська область',
 ]);
 
-const RAION_META_BY_ID = new Map<string, RaionMeta>(indexedRaions.map((r) => [r.meta.id, r.meta]));
+const RAION_META_BY_ID = new Map<string, RaionMeta>([
+  ...indexedRaions.map((r) => [r.meta.id, r.meta] as const),
+  ...indexedRussiaRegions.map((r) => [r.meta.id, r.meta] as const),
+]);
 
 export function getRaionMetaById(raionId: string): RaionMeta | null {
   return RAION_META_BY_ID.get(raionId) ?? null;
@@ -333,12 +336,12 @@ export function computeRaionThreatLevels(
 
   for (const flt of flights) {
     const spec = MUNITION_BY_ID[flt.munitionId];
-    const isUaStrike = !flt.isCarrierAircraft && (spec.faction === 'UA' || spec.allowedTerritory === 'UA');
+    const isUaStrike = spec.faction === 'UA' || spec.allowedTerritory === 'UA';
     const targetRegions = isUaStrike ? indexedRussiaRegions : indexedRaions;
     const level = getMunitionThreatLevel(flt.munitionId, flt.isCarrierAircraft);
 
     // Any aircraft departing from a Russian airfield places ALL of Ukraine on red missile alert
-    if (flt.isCarrierAircraft) {
+    if (flt.isCarrierAircraft && !isUaStrike) {
       for (const region of indexedRaions) {
         result.set(region.meta.id, 'missile');
       }

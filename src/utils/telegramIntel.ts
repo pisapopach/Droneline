@@ -11,6 +11,7 @@ export type TelegramSceneMotif =
   | 'steppe-front';
 
 export interface TelegramChannelMeta {
+  country: 'UA' | 'RU';
   oblast: string;
   title: string;
   shortTitle: string;
@@ -39,6 +40,8 @@ export type TelegramAlertSubtype = 'drone' | 'missile' | 'ballistic' | 'aircraft
 export interface TelegramPost {
   id: string;
   oblast: string;
+  country?: 'UA' | 'RU';
+  count?: number;
   munitionId?: MunitionId;
   carrierAircraftId?: RussianAircraftId;
   targetCity?: string;
@@ -172,6 +175,7 @@ const RAW_CHANNELS: RawChannelSpec[] = [
 ];
 
 export const UKRAINE_TELEGRAM_CHANNELS: TelegramChannelMeta[] = RAW_CHANNELS.map((c) => ({
+  country: 'UA' as const,
   oblast: c.oblast,
   title: c.title,
   shortTitle: c.shortTitle,
@@ -181,8 +185,72 @@ export const UKRAINE_TELEGRAM_CHANNELS: TelegramChannelMeta[] = RAW_CHANNELS.map
   avatarUrl: buildChannelAvatarDataUri(c),
 }));
 
+const RUSSIA_RAW_CHANNELS: RawChannelSpec[] = [
+  { oblast: 'Белгородская область', title: 'Белгород | Тревога и ПВО', shortTitle: 'Белгород', handle: '@belgorod_pvo_live', tag: 'БЕЛГ', subscribersLabel: '412K', bgTop: '#B91C1C', bgBottom: '#130A12', accent: '#FCA5A5', motif: 'steppe-front' },
+  { oblast: 'Курская область', title: 'Курск | Монитор Небо', shortTitle: 'Курск', handle: '@kursk_sky_watch', tag: 'КУРСК', subscribersLabel: '328K', bgTop: '#991B1B', bgBottom: '#140B10', accent: '#F87171', motif: 'steppe-front' },
+  { oblast: 'Брянская область', title: 'Брянск | Воздух и ПВО', shortTitle: 'Брянск', handle: '@bryansk_air_24', tag: 'БРЯН', subscribersLabel: '245K', bgTop: '#C2410C', bgBottom: '#160D09', accent: '#FDBA74', motif: 'radar-city' },
+  { oblast: 'Воронежская область', title: 'Воронеж | Радар ПВО', shortTitle: 'Воронеж', handle: '@voronezh_radar', tag: 'ВОРНЖ', subscribersLabel: '289K', bgTop: '#1E40AF', bgBottom: '#081220', accent: '#60A5FA', motif: 'radar-city' },
+  { oblast: 'Ростовская область', title: 'Ростов-на-Дону | Небо Юга', shortTitle: 'Ростов', handle: '@rostov_sky_south', tag: 'РОСТОВ', subscribersLabel: '356K', bgTop: '#0F766E', bgBottom: '#08141A', accent: '#5EEAD4', motif: 'industrial' },
+  { oblast: 'Краснодарский край', title: 'Кубань | Краснодар ПВО', shortTitle: 'Краснодар', handle: '@kuban_pvo_monitor', tag: 'КУБАНЬ', subscribersLabel: '374K', bgTop: '#0369A1', bgBottom: '#071422', accent: '#38BDF8', motif: 'sea-port' },
+  { oblast: 'Волгоградская область', title: 'Волгоград | Мониторинг', shortTitle: 'Волгоград', handle: '@volgograd_sky', tag: 'ВОЛГ', subscribersLabel: '198K', bgTop: '#B45309', bgBottom: '#140E08', accent: '#FCD34D', motif: 'kyiv-river' },
+  { oblast: 'Саратовская область', title: 'Саратов / Энгельс | ПВО', shortTitle: 'Саратов', handle: '@saratov_engels_pvo', tag: 'САРАТ', subscribersLabel: '215K', bgTop: '#4338CA', bgBottom: '#0C0E20', accent: '#A5B4FC', motif: 'industrial' },
+  { oblast: 'Орловская область', title: 'Орёл | Радар Области', shortTitle: 'Орёл', handle: '@orel_radar_info', tag: 'ОРЁЛ', subscribersLabel: '142K', bgTop: '#1D4ED8', bgBottom: '#0B1324', accent: '#7DD3FC', motif: 'radar-city' },
+  { oblast: 'Липецкая область', title: 'Липецк | Воздушная тревога', shortTitle: 'Липецк', handle: '@lipetsk_air_alert', tag: 'ЛИПЕЦК', subscribersLabel: '164K', bgTop: '#9A3412', bgBottom: '#140B09', accent: '#FB923C', motif: 'industrial' },
+  { oblast: 'Тульская область', title: 'Тула | Монитор Неба', shortTitle: 'Тула', handle: '@tula_pvo_radar', tag: 'ТУЛА', subscribersLabel: '172K', bgTop: '#047857', bgBottom: '#071411', accent: '#6EE7B7', motif: 'industrial' },
+  { oblast: 'Калужская область', title: 'Калуга | ПВО Онлайн', shortTitle: 'Калуга', handle: '@kaluga_sky_24', tag: 'КАЛУГА', subscribersLabel: '149K', bgTop: '#3730A3', bgBottom: '#0B0D1D', accent: '#818CF8', motif: 'radar-city' },
+  { oblast: 'Рязанская область', title: 'Рязань | Сводка ПВО', shortTitle: 'Рязань', handle: '@ryazan_pvo', tag: 'РЯЗАНЬ', subscribersLabel: '138K', bgTop: '#0E7490', bgBottom: '#08131E', accent: '#22D3EE', motif: 'radar-city' },
+  { oblast: 'Тамбовская область', title: 'Тамбов | Контроль Неба', shortTitle: 'Тамбов', handle: '@tambov_sky', tag: 'ТАМБОВ', subscribersLabel: '112K', bgTop: '#6D28D9', bgBottom: '#100B1F', accent: '#C4B5FD', motif: 'steppe-front' },
+  { oblast: 'Смоленская область', title: 'Смоленск | Запад ПВО', shortTitle: 'Смоленск', handle: '@smolensk_pvo', tag: 'СМОЛ', subscribersLabel: '129K', bgTop: '#1E3A8A', bgBottom: '#09101D', accent: '#93C5FD', motif: 'radar-city' },
+  { oblast: 'Тверская область', title: 'Тверь | Монитор Неба', shortTitle: 'Тверь', handle: '@tver_sky_radar', tag: 'ТВЕРЬ', subscribersLabel: '118K', bgTop: '#0369A1', bgBottom: '#09131F', accent: '#38BDF8', motif: 'kyiv-river' },
+  { oblast: 'Московская область', title: 'Подмосковье | Радар ПВО', shortTitle: 'Подмосковье', handle: '@msk_oblast_pvo', tag: 'МОС·ОБЛ', subscribersLabel: '485K', bgTop: '#1D4ED8', bgBottom: '#0B1324', accent: '#38BDF8', motif: 'radar-city' },
+  { oblast: 'г. Москва', title: 'Москва | Воздушный Радар', shortTitle: 'Москва', handle: '@moscow_sky_live', tag: 'МОСКВА', subscribersLabel: '790K', bgTop: '#1E40AF', bgBottom: '#070E1E', accent: '#60A5FA', motif: 'kyiv-river' },
+  { oblast: 'Ленинградская область', title: 'Ленобласть | Северо-Запад', shortTitle: 'Ленобласть', handle: '@lenobl_sky', tag: 'ЛЕНОБЛ', subscribersLabel: '234K', bgTop: '#0E7490', bgBottom: '#071419', accent: '#67E8F9', motif: 'sea-port' },
+  { oblast: 'г. Санкт-Петербург', title: 'Петербург | Небо и ПВО', shortTitle: 'Петербург', handle: '@spb_pvo_watch', tag: 'СПБ', subscribersLabel: '420K', bgTop: '#0369A1', bgBottom: '#061423', accent: '#7DD3FC', motif: 'sea-port' },
+  { oblast: 'Псковская область', title: 'Псков | Граница ПВО', shortTitle: 'Псков', handle: '@pskov_pvo_live', tag: 'ПСКОВ', subscribersLabel: '124K', bgTop: '#4F46E5', bgBottom: '#0D0E20', accent: '#A5B4FC', motif: 'radar-city' },
+  { oblast: 'Нижегородская область', title: 'Нижний Новгород | ПВО', shortTitle: 'Н. Новгород', handle: '@nn_pvo_radar', tag: 'НИЖН', subscribersLabel: '205K', bgTop: '#0F766E', bgBottom: '#091519', accent: '#2DD4BF', motif: 'industrial' },
+  { oblast: 'Татарстан', title: 'Татарстан | Казань Небо', shortTitle: 'Татарстан', handle: '@tatarstan_sky', tag: 'КАЗАНЬ', subscribersLabel: '268K', bgTop: '#047857', bgBottom: '#081612', accent: '#34D399', motif: 'industrial' },
+  { oblast: 'Самарская область', title: 'Самара | Поволжье ПВО', shortTitle: 'Самара', handle: '@samara_pvo_live', tag: 'САМАРА', subscribersLabel: '186K', bgTop: '#0284C7', bgBottom: '#08131E', accent: '#7DD3FC', motif: 'kyiv-river' },
+  { oblast: 'Ульяновская область', title: 'Ульяновск | Монитор', shortTitle: 'Ульяновск', handle: '@ulyanovsk_sky', tag: 'УЛЬЯН', subscribersLabel: '94K', bgTop: '#3730A3', bgBottom: '#0B0D1D', accent: '#818CF8', motif: 'radar-city' },
+  { oblast: 'Пензенская область', title: 'Пенза | Небо и ПВО', shortTitle: 'Пенза', handle: '@penza_pvo', tag: 'ПЕНЗА', subscribersLabel: '89K', bgTop: '#4338CA', bgBottom: '#0C0E20', accent: '#A5B4FC', motif: 'radar-city' },
+  { oblast: 'Ярославская область', title: 'Ярославль | ПВО', shortTitle: 'Ярославль', handle: '@yaroslavl_pvo', tag: 'ЯРОСЛ', subscribersLabel: '108K', bgTop: '#1D4ED8', bgBottom: '#0A1120', accent: '#60A5FA', motif: 'kyiv-river' },
+  { oblast: 'Новгородская область', title: 'Новгород | Радар ПВО', shortTitle: 'В. Новгород', handle: '@novgorod_sky', tag: 'НОВГ', subscribersLabel: '78K', bgTop: '#0E7490', bgBottom: '#08131E', accent: '#22D3EE', motif: 'radar-city' },
+  { oblast: 'Астраханская область', title: 'Астрахань | Каспий ПВО', shortTitle: 'Астрахань', handle: '@astrakhan_pvo', tag: 'АСТР', subscribersLabel: '115K', bgTop: '#B45309', bgBottom: '#140E08', accent: '#FCD34D', motif: 'sea-port' },
+  { oblast: 'Ставропольский край', title: 'Ставрополье | Кавказ ПВО', shortTitle: 'Ставрополье', handle: '@stavropol_pvo', tag: 'СТАВР', subscribersLabel: '144K', bgTop: '#047857', bgBottom: '#071411', accent: '#6EE7B7', motif: 'west-peaks' },
+  { oblast: 'Республика Северная Осетия-Алания', title: 'Сев. Осетия | Моздок ПВО', shortTitle: 'Сев. Осетия', handle: '@alania_pvo', tag: 'ОСЕТИЯ', subscribersLabel: '92K', bgTop: '#0369A1', bgBottom: '#091421', accent: '#38BDF8', motif: 'west-peaks' },
+  { oblast: 'Мурманская область', title: 'Мурманск | Заполярье ПВО', shortTitle: 'Мурманск', handle: '@murmansk_pvo', tag: 'МУРМ', subscribersLabel: '121K', bgTop: '#1E3A8A', bgBottom: '#071222', accent: '#93C5FD', motif: 'sea-port' },
+  { oblast: 'Калининградская область', title: 'Калининград | Балтика', shortTitle: 'Калининград', handle: '@kaliningrad_pvo', tag: 'КАЛИН', subscribersLabel: '158K', bgTop: '#0E7490', bgBottom: '#071422', accent: '#67E8F9', motif: 'sea-port' },
+  { oblast: 'Республика Адыгея', title: 'Адыгея | Монитор ПВО', shortTitle: 'Адыгея', handle: '@adygea_pvo', tag: 'АДЫГ', subscribersLabel: '64K', bgTop: '#047857', bgBottom: '#081612', accent: '#34D399', motif: 'west-peaks' },
+  { oblast: 'Чувашия', title: 'Чувашия | Чебоксары ПВО', shortTitle: 'Чувашия', handle: '@chuvashia_pvo', tag: 'ЧУВАШ', subscribersLabel: '82K', bgTop: '#0F766E', bgBottom: '#08141A', accent: '#5EEAD4', motif: 'industrial' },
+  { oblast: 'Мордовия', title: 'Мордовия | Саранск ПВО', shortTitle: 'Мордовия', handle: '@mordovia_pvo', tag: 'САРАНСК', subscribersLabel: '76K', bgTop: '#6D28D9', bgBottom: '#100B1F', accent: '#C4B5FD', motif: 'radar-city' },
+  { oblast: 'Республика Башкортостан', title: 'Башкортостан | Уфа ПВО', shortTitle: 'Башкортостан', handle: '@ufa_pvo_live', tag: 'УФА', subscribersLabel: '194K', bgTop: '#047857', bgBottom: '#071411', accent: '#6EE7B7', motif: 'industrial' },
+  { oblast: 'Ивановская область', title: 'Иваново | Монитор Неба', shortTitle: 'Иваново', handle: '@ivanovo_pvo', tag: 'ИВАН', subscribersLabel: '88K', bgTop: '#1D4ED8', bgBottom: '#0A1120', accent: '#60A5FA', motif: 'radar-city' },
+  { oblast: 'Владимирская область', title: 'Владимир | Небо ПВО', shortTitle: 'Владимир', handle: '@vladimir_pvo', tag: 'ВЛАД', subscribersLabel: '96K', bgTop: '#4338CA', bgBottom: '#0C0E20', accent: '#A5B4FC', motif: 'radar-city' },
+  { oblast: 'Костромская область', title: 'Кострома | ПВО', shortTitle: 'Кострома', handle: '@kostroma_pvo', tag: 'КОСТР', subscribersLabel: '71K', bgTop: '#0E7490', bgBottom: '#08131E', accent: '#22D3EE', motif: 'kyiv-river' },
+  { oblast: 'Вологодская область', title: 'Вологда | Север ПВО', shortTitle: 'Вологда', handle: '@vologda_sky', tag: 'ВОЛОГ', subscribersLabel: '84K', bgTop: '#0369A1', bgBottom: '#091421', accent: '#38BDF8', motif: 'radar-city' },
+  { oblast: 'Республика Карелия', title: 'Карелия | Небо и ПВО', shortTitle: 'Карелия', handle: '@karelia_pvo', tag: 'КАРЕЛ', subscribersLabel: '69K', bgTop: '#0F766E', bgBottom: '#091519', accent: '#2DD4BF', motif: 'west-peaks' },
+  { oblast: 'Республика Калмыкия', title: 'Калмыкия | Степь ПВО', shortTitle: 'Калмыкия', handle: '@kalmykia_pvo', tag: 'ЭЛИСТА', subscribersLabel: '54K', bgTop: '#B45309', bgBottom: '#140E08', accent: '#FCD34D', motif: 'steppe-front' },
+  { oblast: 'Республика Дагестан', title: 'Дагестан | Каспий ПВО', shortTitle: 'Дагестан', handle: '@dagestan_pvo', tag: 'ДАГ', subscribersLabel: '132K', bgTop: '#047857', bgBottom: '#081612', accent: '#34D399', motif: 'sea-port' },
+  { oblast: 'Чеченская Республика', title: 'Чечня | Грозный ПВО', shortTitle: 'Чечня', handle: '@grozny_pvo', tag: 'ГРОЗН', subscribersLabel: '118K', bgTop: '#0F766E', bgBottom: '#08141A', accent: '#5EEAD4', motif: 'west-peaks' },
+];
+
+export const RUSSIA_TELEGRAM_CHANNELS: TelegramChannelMeta[] = RUSSIA_RAW_CHANNELS.map((c) => ({
+  country: 'RU' as const,
+  oblast: c.oblast,
+  title: c.title,
+  shortTitle: c.shortTitle,
+  handle: c.handle,
+  tag: c.tag,
+  subscribersLabel: c.subscribersLabel,
+  avatarUrl: buildChannelAvatarDataUri(c),
+}));
+
+export const ALL_TELEGRAM_CHANNELS: TelegramChannelMeta[] = [
+  ...UKRAINE_TELEGRAM_CHANNELS,
+  ...RUSSIA_TELEGRAM_CHANNELS,
+];
+
 const CHANNEL_BY_OBLAST = new Map<string, TelegramChannelMeta>(
-  UKRAINE_TELEGRAM_CHANNELS.map((c) => [c.oblast, c]),
+  ALL_TELEGRAM_CHANNELS.map((c) => [c.oblast, c]),
 );
 
 export function getTelegramChannelByOblast(oblast: string): TelegramChannelMeta | null {
@@ -456,6 +524,156 @@ export const UKRAINE_SETTLEMENTS: SettlementPoint[] = [
   { name: 'Севастополь', kind: 'г.', lat: 44.6166, lng: 33.5254 },
 ];
 
+export const RUSSIA_SETTLEMENTS: SettlementPoint[] = [
+  // Белгородская область
+  { name: 'Белгород', kind: 'г.', lat: 50.5997, lng: 36.5983, isMajor: true },
+  { name: 'Старый Оскол', kind: 'г.', lat: 51.2967, lng: 37.8417 },
+  { name: 'Губкин', kind: 'г.', lat: 51.2817, lng: 37.5411 },
+  { name: 'Шебекино', kind: 'г.', lat: 50.4094, lng: 36.8906 },
+  { name: 'Валуйки', kind: 'г.', lat: 50.2119, lng: 38.1072 },
+  { name: 'Алексеевка', kind: 'г.', lat: 50.6303, lng: 38.6889 },
+  { name: 'Строитель', kind: 'г.', lat: 50.7847, lng: 36.4836 },
+  { name: 'Грайворон', kind: 'г.', lat: 50.4792, lng: 35.6761 },
+  { name: 'Короча', kind: 'г.', lat: 50.8075, lng: 37.1942 },
+  { name: 'Новый Оскол', kind: 'г.', lat: 50.7647, lng: 37.8686 },
+  { name: 'Ракитное', kind: 'пгт', lat: 50.8386, lng: 35.8506 },
+  { name: 'Чернянка', kind: 'пгт', lat: 50.9358, lng: 37.8047 },
+  { name: 'Волоконовка', kind: 'пгт', lat: 50.4914, lng: 37.8681 },
+  { name: 'Прохоровка', kind: 'пгт', lat: 51.0369, lng: 36.7314 },
+  { name: 'Борисовка', kind: 'пгт', lat: 50.6061, lng: 36.0206 },
+  { name: 'Разумное', kind: 'пгт', lat: 50.5436, lng: 36.6872 },
+
+  // Курская область
+  { name: 'Курск', kind: 'г.', lat: 51.7373, lng: 36.1873, isMajor: true },
+  { name: 'Железногорск', kind: 'г.', lat: 52.3372, lng: 35.3672 },
+  { name: 'Курчатов', kind: 'г.', lat: 51.6606, lng: 35.6572 },
+  { name: 'Льгов', kind: 'г.', lat: 51.6639, lng: 35.2653 },
+  { name: 'Рыльск', kind: 'г.', lat: 51.5689, lng: 34.6778 },
+  { name: 'Суджа', kind: 'г.', lat: 51.1908, lng: 35.2719 },
+  { name: 'Обоянь', kind: 'г.', lat: 51.2097, lng: 36.2783 },
+  { name: 'Щигры', kind: 'г.', lat: 51.8744, lng: 36.9061 },
+  { name: 'Дмитриев', kind: 'г.', lat: 52.1269, lng: 35.0756 },
+  { name: 'Глушково', kind: 'пгт', lat: 51.3458, lng: 34.6419 },
+  { name: 'Коренево', kind: 'пгт', lat: 51.4094, lng: 34.9019 },
+  { name: 'Хомутовка', kind: 'пгт', lat: 51.9086, lng: 34.5683 },
+
+  // Брянская и Орловская области
+  { name: 'Брянск', kind: 'г.', lat: 53.2435, lng: 34.3634, isMajor: true },
+  { name: 'Клинцы', kind: 'г.', lat: 52.7525, lng: 32.2389 },
+  { name: 'Новозыбков', kind: 'г.', lat: 52.5361, lng: 31.9303 },
+  { name: 'Дятьково', kind: 'г.', lat: 53.6003, lng: 34.3358 },
+  { name: 'Унеча', kind: 'г.', lat: 52.8453, lng: 32.6775 },
+  { name: 'Карачев', kind: 'г.', lat: 53.1233, lng: 34.9839 },
+  { name: 'Стародуб', kind: 'г.', lat: 52.5831, lng: 32.7628 },
+  { name: 'Трубчевск', kind: 'г.', lat: 52.5808, lng: 33.7706 },
+  { name: 'Севск', kind: 'г.', lat: 52.1489, lng: 34.4875 },
+  { name: 'Климово', kind: 'пгт', lat: 52.3831, lng: 32.1922 },
+  { name: 'Суземка', kind: 'пгт', lat: 52.3236, lng: 34.0792 },
+  { name: 'Орёл', kind: 'г.', lat: 52.9651, lng: 36.0785, isMajor: true },
+  { name: 'Ливны', kind: 'г.', lat: 52.4267, lng: 37.6061 },
+  { name: 'Мценск', kind: 'г.', lat: 53.2775, lng: 36.5719 },
+  { name: 'Болхов', kind: 'г.', lat: 53.4428, lng: 36.0044 },
+  { name: 'Кромы', kind: 'пгт', lat: 52.6881, lng: 35.7689 },
+
+  // Воронежская, Липецкая, Тамбовская, Волгоградская, Саратовская
+  { name: 'Воронеж', kind: 'г.', lat: 51.672, lng: 39.1843, isMajor: true },
+  { name: 'Борисоглебск', kind: 'г.', lat: 51.3667, lng: 42.0833 },
+  { name: 'Россошь', kind: 'г.', lat: 50.1972, lng: 39.5756 },
+  { name: 'Лиски', kind: 'г.', lat: 50.985, lng: 39.5153 },
+  { name: 'Острогожск', kind: 'г.', lat: 50.8658, lng: 39.0764 },
+  { name: 'Бутурлиновка', kind: 'г.', lat: 50.8286, lng: 40.5878 },
+  { name: 'Павловск', kind: 'г.', lat: 50.4578, lng: 40.1078 },
+  { name: 'Кантемировка', kind: 'пгт', lat: 49.6967, lng: 39.8581 },
+  { name: 'Анна', kind: 'пгт', lat: 51.4875, lng: 40.4272 },
+  { name: 'Липецк', kind: 'г.', lat: 52.6031, lng: 39.5708, isMajor: true },
+  { name: 'Елец', kind: 'г.', lat: 52.6239, lng: 38.5019 },
+  { name: 'Грязи', kind: 'г.', lat: 52.4958, lng: 39.9469 },
+  { name: 'Лебедянь', kind: 'г.', lat: 53.0197, lng: 39.1464 },
+  { name: 'Тамбов', kind: 'г.', lat: 52.7212, lng: 41.4523, isMajor: true },
+  { name: 'Мичуринск', kind: 'г.', lat: 52.8978, lng: 40.4919 },
+  { name: 'Котовск', kind: 'г.', lat: 52.5831, lng: 41.5039 },
+  { name: 'Моршанск', kind: 'г.', lat: 53.4436, lng: 41.8106 },
+  { name: 'Волгоград', kind: 'г.', lat: 48.708, lng: 44.5133, isMajor: true },
+  { name: 'Волжский', kind: 'г.', lat: 48.7858, lng: 44.7758 },
+  { name: 'Камышин', kind: 'г.', lat: 50.0983, lng: 45.4167 },
+  { name: 'Калач-на-Дону', kind: 'г.', lat: 48.6911, lng: 43.5339 },
+  { name: 'Ахтубинск', kind: 'г.', lat: 48.2789, lng: 46.1714 },
+  { name: 'Саратов', kind: 'г.', lat: 51.5336, lng: 46.0343, isMajor: true },
+  { name: 'Энгельс', kind: 'г.', lat: 51.4833, lng: 46.1167 },
+  { name: 'Балаково', kind: 'г.', lat: 52.0272, lng: 47.7956 },
+  { name: 'Балашов', kind: 'г.', lat: 51.55, lng: 43.1667 },
+
+  // Ростовская область и Краснодарский край
+  { name: 'Ростов-на-Дону', kind: 'г.', lat: 47.2357, lng: 39.7015, isMajor: true },
+  { name: 'Таганрог', kind: 'г.', lat: 47.2362, lng: 38.8969 },
+  { name: 'Шахты', kind: 'г.', lat: 47.7091, lng: 40.2144 },
+  { name: 'Новочеркасск', kind: 'г.', lat: 47.4141, lng: 40.1104 },
+  { name: 'Волгодонск', kind: 'г.', lat: 47.5136, lng: 42.1514 },
+  { name: 'Батайск', kind: 'г.', lat: 47.1397, lng: 39.7518 },
+  { name: 'Миллерово', kind: 'г.', lat: 48.9219, lng: 40.3961 },
+  { name: 'Морозовск', kind: 'г.', lat: 48.3528, lng: 41.8258 },
+  { name: 'Каменск-Шахтинский', kind: 'г.', lat: 48.3164, lng: 40.2589 },
+  { name: 'Азов', kind: 'г.', lat: 47.1078, lng: 39.4169 },
+  { name: 'Матвеев Курган', kind: 'пгт', lat: 47.5719, lng: 38.8672 },
+  { name: 'Чертково', kind: 'пгт', lat: 49.3769, lng: 40.1592 },
+  { name: 'Краснодар', kind: 'г.', lat: 45.0355, lng: 38.9753, isMajor: true },
+  { name: 'Новороссийск', kind: 'г.', lat: 44.7239, lng: 37.7689 },
+  { name: 'Сочи', kind: 'г.', lat: 43.6028, lng: 39.7342 },
+  { name: 'Анапа', kind: 'г.', lat: 44.8949, lng: 37.3162 },
+  { name: 'Геленджик', kind: 'г.', lat: 44.5611, lng: 38.0772 },
+  { name: 'Туапсе', kind: 'г.', lat: 44.0997, lng: 39.0761 },
+  { name: 'Ейск', kind: 'г.', lat: 46.7111, lng: 38.2739 },
+  { name: 'Приморско-Ахтарск', kind: 'г.', lat: 46.0467, lng: 38.1731 },
+  { name: 'Тихорецк', kind: 'г.', lat: 45.8539, lng: 40.1253 },
+  { name: 'Славянск-на-Кубани', kind: 'г.', lat: 45.2564, lng: 38.1261 },
+  { name: 'Крымск', kind: 'г.', lat: 44.9289, lng: 37.9917 },
+  { name: 'Афипский', kind: 'пгт', lat: 44.9061, lng: 38.8289 },
+  { name: 'Ильский', kind: 'пгт', lat: 44.8536, lng: 38.5736 },
+  { name: 'Тамань', kind: 'с.', lat: 45.2111, lng: 36.7153 },
+
+  // Центр, Москва, Питер, Поволжье, Север и Кавказ
+  { name: 'Калуга', kind: 'г.', lat: 54.5138, lng: 36.2612, isMajor: true },
+  { name: 'Обнинск', kind: 'г.', lat: 55.0968, lng: 36.6101 },
+  { name: 'Киров (Калуж.)', kind: 'г.', lat: 54.0867, lng: 34.3036 },
+  { name: 'Тула', kind: 'г.', lat: 54.1931, lng: 37.6173, isMajor: true },
+  { name: 'Новомосковск', kind: 'г.', lat: 54.0111, lng: 38.2911 },
+  { name: 'Рязань', kind: 'г.', lat: 54.6292, lng: 39.7364, isMajor: true },
+  { name: 'Смоленск', kind: 'г.', lat: 54.7826, lng: 32.0453, isMajor: true },
+  { name: 'Рославль', kind: 'г.', lat: 53.9522, lng: 32.8639 },
+  { name: 'Москва', kind: 'г.', lat: 55.7558, lng: 37.6173, isMajor: true },
+  { name: 'Подольск', kind: 'г.', lat: 55.4312, lng: 37.5458 },
+  { name: 'Коломна', kind: 'г.', lat: 55.0938, lng: 38.7684 },
+  { name: 'Раменское', kind: 'г.', lat: 55.5673, lng: 38.2258 },
+  { name: 'Серпухов', kind: 'г.', lat: 54.9136, lng: 37.4172 },
+  { name: 'Можайск', kind: 'г.', lat: 55.5022, lng: 36.0289 },
+  { name: 'Тверь', kind: 'г.', lat: 56.8587, lng: 35.9176, isMajor: true },
+  { name: 'Торопец', kind: 'г.', lat: 56.4981, lng: 31.6353 },
+  { name: 'Псков', kind: 'г.', lat: 57.8193, lng: 28.3318, isMajor: true },
+  { name: 'Великие Луки', kind: 'г.', lat: 56.3403, lng: 30.5256 },
+  { name: 'Санкт-Петербург', kind: 'г.', lat: 59.9311, lng: 30.3609, isMajor: true },
+  { name: 'Усть-Луга', kind: 'пгт', lat: 59.6331, lng: 28.2939 },
+  { name: 'Кириши', kind: 'г.', lat: 59.4481, lng: 32.0189 },
+  { name: 'Выборг', kind: 'г.', lat: 60.7105, lng: 28.7495 },
+  { name: 'Нижний Новгород', kind: 'г.', lat: 56.3269, lng: 44.0059, isMajor: true },
+  { name: 'Дзержинск', kind: 'г.', lat: 56.2414, lng: 43.4614 },
+  { name: 'Кулебаки', kind: 'г.', lat: 55.4192, lng: 42.5228 },
+  { name: 'Кстово', kind: 'г.', lat: 56.1517, lng: 44.1981 },
+  { name: 'Казань', kind: 'г.', lat: 55.7961, lng: 49.1064, isMajor: true },
+  { name: 'Нижнекамск', kind: 'г.', lat: 55.6367, lng: 51.8244 },
+  { name: 'Елабуга', kind: 'г.', lat: 55.7581, lng: 52.0497 },
+  { name: 'Альметьевск', kind: 'г.', lat: 54.9014, lng: 52.2972 },
+  { name: 'Самара', kind: 'г.', lat: 53.1959, lng: 50.1002, isMajor: true },
+  { name: 'Сызрань', kind: 'г.', lat: 53.1558, lng: 48.4681 },
+  { name: 'Тольятти', kind: 'г.', lat: 53.5078, lng: 49.4204 },
+  { name: 'Ульяновск', kind: 'г.', lat: 54.3142, lng: 48.4031, isMajor: true },
+  { name: 'Астрахань', kind: 'г.', lat: 46.3476, lng: 48.0302, isMajor: true },
+  { name: 'Ставрополь', kind: 'г.', lat: 45.0445, lng: 41.9691, isMajor: true },
+  { name: 'Моздок', kind: 'г.', lat: 43.7444, lng: 44.6589 },
+  { name: 'Мурманск', kind: 'г.', lat: 68.9585, lng: 33.0827, isMajor: true },
+  { name: 'Оленегорск', kind: 'г.', lat: 68.1444, lng: 33.2778 },
+  { name: 'Калининград', kind: 'г.', lat: 54.7104, lng: 20.4522, isMajor: true },
+];
+
 export function formatSettlementLabel(s: SettlementPoint): string {
   return `${s.kind} ${s.name}`;
 }
@@ -463,10 +681,12 @@ export function formatSettlementLabel(s: SettlementPoint): string {
 export function findNearestSettlementInfo(
   lat: number,
   lng: number,
+  country?: 'UA' | 'RU',
 ): { fullLabel: string; name: string; distKm: number } {
-  let best = UKRAINE_SETTLEMENTS[0];
+  const pool = country === 'RU' ? RUSSIA_SETTLEMENTS : UKRAINE_SETTLEMENTS;
+  let best = pool[0];
   let bestDist = Infinity;
-  for (const item of UKRAINE_SETTLEMENTS) {
+  for (const item of pool) {
     const d = haversineDistanceKm(lat, lng, item.lat, item.lng);
     if (d < bestDist) {
       bestDist = d;
@@ -508,6 +728,53 @@ const OBLAST_TRANSIT_NAME_RU: Record<string, { acc: string; short: string }> = {
   'Луганська область': { acc: 'Луганскую область', short: 'Луганскую обл.' },
   'АР Крим': { acc: 'Крым', short: 'Крым' },
   'м. Севастополь': { acc: 'г. Севастополь', short: 'Севастополь' },
+
+  // Россия
+  'Белгородская область': { acc: 'Белгородскую область', short: 'Белгородскую обл.' },
+  'Курская область': { acc: 'Курскую область', short: 'Курскую обл.' },
+  'Брянская область': { acc: 'Брянскую область', short: 'Брянскую обл.' },
+  'Воронежская область': { acc: 'Воронежскую область', short: 'Воронежскую обл.' },
+  'Ростовская область': { acc: 'Ростовскую область', short: 'Ростовскую обл.' },
+  'Краснодарский край': { acc: 'Краснодарский край', short: 'Краснодарский край' },
+  'Волгоградская область': { acc: 'Волгоградскую область', short: 'Волгоградскую обл.' },
+  'Саратовская область': { acc: 'Саратовскую область', short: 'Саратовскую обл.' },
+  'Орловская область': { acc: 'Орловскую область', short: 'Орловскую обл.' },
+  'Липецкая область': { acc: 'Липецкую область', short: 'Липецкую обл.' },
+  'Тульская область': { acc: 'Тульскую область', short: 'Тульскую обл.' },
+  'Калужская область': { acc: 'Калужскую область', short: 'Калужскую обл.' },
+  'Рязанская область': { acc: 'Рязанскую область', short: 'Рязанскую обл.' },
+  'Тамбовская область': { acc: 'Тамбовскую область', short: 'Тамбовскую обл.' },
+  'Смоленская область': { acc: 'Смоленскую область', short: 'Смоленскую обл.' },
+  'Тверская область': { acc: 'Тверскую область', short: 'Тверскую обл.' },
+  'Ярославская область': { acc: 'Ярославскую область', short: 'Ярославскую обл.' },
+  'Московская область': { acc: 'Московскую область', short: 'Московскую обл.' },
+  'г. Москва': { acc: 'г. Москва', short: 'Москва' },
+  'Ленинградская область': { acc: 'Ленинградскую область', short: 'Ленобласть' },
+  'г. Санкт-Петербург': { acc: 'г. Санкт-Петербург', short: 'Санкт-Петербург' },
+  'Псковская область': { acc: 'Псковскую область', short: 'Псковскую обл.' },
+  'Новгородская область': { acc: 'Новгородскую область', short: 'Новгородскую обл.' },
+  'Нижегородская область': { acc: 'Нижегородскую область', short: 'Нижегородскую обл.' },
+  'Татарстан': { acc: 'Республику Татарстан', short: 'Татарстан' },
+  'Самарская область': { acc: 'Самарскую область', short: 'Самарскую обл.' },
+  'Ульяновская область': { acc: 'Ульяновскую область', short: 'Ульяновскую обл.' },
+  'Пензенская область': { acc: 'Пензенскую область', short: 'Пензенскую обл.' },
+  'Астраханская область': { acc: 'Астраханскую область', short: 'Астраханскую обл.' },
+  'Ставропольский край': { acc: 'Ставропольский край', short: 'Ставропольский край' },
+  'Республика Северная Осетия-Алания': { acc: 'Северную Осетию', short: 'Сев. Осетия' },
+  'Мурманская область': { acc: 'Мурманскую область', short: 'Мурманскую обл.' },
+  'Калининградская область': { acc: 'Калининградскую область', short: 'Калининградскую обл.' },
+  'Республика Адыгея': { acc: 'Республику Адыгея', short: 'Адыгея' },
+  'Чувашия': { acc: 'Чувашию', short: 'Чувашия' },
+  'Мордовия': { acc: 'Мордовию', short: 'Мордовия' },
+  'Республика Башкортостан': { acc: 'Башкортостан', short: 'Башкортостан' },
+  'Ивановская область': { acc: 'Ивановскую область', short: 'Ивановскую обл.' },
+  'Владимирская область': { acc: 'Владимирскую область', short: 'Владимирскую обл.' },
+  'Костромская область': { acc: 'Костромскую область', short: 'Костромскую обл.' },
+  'Вологодская область': { acc: 'Вологодскую область', short: 'Вологодскую обл.' },
+  'Республика Карелия': { acc: 'Карелию', short: 'Карелия' },
+  'Республика Калмыкия': { acc: 'Калмыкию', short: 'Калмыкия' },
+  'Республика Дагестан': { acc: 'Дагестан', short: 'Дагестан' },
+  'Чеченская Республика': { acc: 'Чеченскую Республику', short: 'Чечня' },
 };
 
 export function formatOblastTransitAccusative(oblast: string): string {
@@ -530,7 +797,31 @@ export function computeCompassDirectionRu(bearingDeg: number): string {
   return 'северо-запад';
 }
 
+function formatThreatLabelWithCount(
+  munitionId: MunitionId | undefined,
+  count: number,
+  isShahed: boolean,
+): string {
+  const mSpec = munitionId ? MUNITION_BY_ID[munitionId] : null;
+  if (count <= 1) {
+    if (isShahed) {
+      return munitionId === 'shahed-238' ? 'реактивный «Шахед»' : '«Шахед»';
+    }
+    return mSpec?.name ?? 'Воздушная цель';
+  }
+  if (isShahed) {
+    const word = count <= 4 ? '«Шахеда»' : '«Шахедов»';
+    return munitionId === 'shahed-238' ? `${count}х реактивных ${word}` : `${count}х ${word}`;
+  }
+  if (mSpec) {
+    return `${count}х ${mSpec.shortName}`;
+  }
+  return `${count}х целей`;
+}
+
 export function buildTelegramMessageText(params: {
+  country?: 'UA' | 'RU';
+  count?: number;
   munitionId?: MunitionId;
   carrierAircraftId?: RussianAircraftId;
   targetCity?: string;
@@ -544,12 +835,21 @@ export function buildTelegramMessageText(params: {
   bearingDeg?: number;
   raionName?: string;
 }): string {
+  const isRu = params.country === 'RU';
+  const count = Math.max(1, params.count ?? 1);
+  const isGroup = count > 1;
+  const pvoWord = isRu ? 'ПВО' : 'ППО';
+
   if (params.eventKind === 'alert_off') {
-    return '🟢 Область чистая! ОТБОЙ воздушной тревоги. Можно покидать укрытия.';
+    return isRu
+      ? '🟢 Небо чистое! ОТБОЙ воздушной опасности. Режим тревоги снят.'
+      : '🟢 Область чистая! ОТБОЙ воздушной тревоги. Можно покидать укрытия.';
   }
 
   if (params.eventKind === 'dorozvedka') {
-    return '🔎 Дорозведка в области — воздушные цели больше не фиксируются. Оставайтесь в укрытиях до отбоя!';
+    return isRu
+      ? '🔎 Доразведка в регионе — новые воздушные цели не фиксируются. Дождитесь официального отбоя.'
+      : '🔎 Дорозведка в области — воздушные цели больше не фиксируются. Оставайтесь в укрытиях до отбоя!';
   }
 
   if (params.eventKind === 'alert_on' || params.eventKind === 'alert_upgrade') {
@@ -558,44 +858,53 @@ export function buildTelegramMessageText(params: {
         ? ` (${params.alertRaionNames.slice(0, 3).join(', ')})`
         : '';
     if (params.alertSubtype === 'ballistic') {
-      return `🔴 ВНИМАНИЕ! УГРОЗА ПРИМЕНЕНИЯ БАЛЛИСТИКИ${raionList}! Срочно в укрытия!`;
+      return isRu
+        ? `🔴 ВНИМАНИЕ! БАЛЛИСТИЧЕСКАЯ УГРОЗА${raionList}! Немедленно пройдите в укрытия!`
+        : `🔴 ВНИМАНИЕ! УГРОЗА ПРИМЕНЕНИЯ БАЛЛИСТИКИ${raionList}! Срочно в укрытия!`;
     }
     if (params.alertSubtype === 'aircraft') {
-      return `🔴 ВОЗДУШНАЯ ТРЕВОГА — взлёт ракетоносителя РФ / ракетная опасность${raionList}!`;
+      return isRu
+        ? `🔴 ОПАСНОСТЬ ПО АВИАЦИИ ВСУ${raionList} — возможен пуск крылатых ракет / УАБ!`
+        : `🔴 ВОЗДУШНАЯ ТРЕВОГА — взлёт ракетоносителя РФ / ракетная опасность${raionList}!`;
     }
     if (params.alertSubtype === 'missile') {
-      return `🔴 РАКЕТНАЯ ОПАСНОСТЬ по области${raionList}! Находитесь в безопасных местах!`;
+      return isRu
+        ? `🔴 РАКЕТНАЯ ОПАСНОСТЬ в регионе${raionList}! Соблюдайте меры безопасности!`
+        : `🔴 РАКЕТНАЯ ОПАСНОСТЬ по области${raionList}! Находитесь в безопасных местах!`;
     }
-    return `🟡 ВОЗДУШНАЯ ТРЕВОГА (угроза ударных БПЛА)${raionList}. Следите за курсом!`;
+    return isRu
+      ? `🟡 ОПАСНОСТЬ АТАКИ БПЛА${raionList}. Дежурные средства ${pvoWord} в готовности.`
+      : `🟡 ВОЗДУШНАЯ ТРЕВОГА (угроза ударных БПЛА)${raionList}. Следите за курсом!`;
   }
 
   if (params.eventKind === 'intercepted') {
-    const mSpecInt = params.munitionId ? MUNITION_BY_ID[params.munitionId] : null;
     const isShahedInt =
       params.munitionId === 'shahed-136' || params.munitionId === 'shahed-238';
-    const targetNameInt = isShahedInt
-      ? params.munitionId === 'shahed-238'
-        ? 'реактивный «Шахед»'
-        : '«Шахед»'
-      : mSpecInt?.name ?? 'воздушную цель';
+    const targetNameInt = formatThreatLabelWithCount(params.munitionId, count, isShahedInt);
     const wherePlaceInt = params.nearCity
-      ? params.raionName
+      ? params.raionName && !isRu
         ? `в районе ${params.nearCity} (${params.raionName})`
         : `в районе ${params.nearCity}`
       : params.raionName
         ? `в ${params.raionName}`
-        : 'в области';
-    return `✅ Отработало ППО — сбита цель (${targetNameInt}) ${wherePlaceInt}!`;
+        : isRu
+          ? 'в регионе'
+          : 'в области';
+    return isGroup
+      ? `✅ Отработало ${pvoWord} — сбиты ${targetNameInt} ${wherePlaceInt}!`
+      : `✅ Отработало ${pvoWord} — сбита цель (${targetNameInt}) ${wherePlaceInt}!`;
   }
 
   if (params.eventKind === 'explosion') {
     const wherePlace = params.nearCity
-      ? params.raionName
+      ? params.raionName && !isRu
         ? `в районе ${params.nearCity} (${params.raionName})`
         : `в районе ${params.nearCity}`
       : params.raionName
         ? `в ${params.raionName}`
-        : 'в области';
+        : isRu
+          ? 'в регионе'
+          : 'в области';
     return `💥 Прогремел взрыв ${wherePlace}! Находитесь в укрытиях!`;
   }
 
@@ -610,7 +919,7 @@ export function buildTelegramMessageText(params: {
 
   if (params.carrierAircraftId && mSpec) {
     const carrier = RUSSIAN_AIRCRAFT_BY_ID[params.carrierAircraftId];
-    return `✈️ В воздухе ${carrier.shortName} (носитель ${mSpec.shortName})${
+    return `✈️ В воздухе ${isGroup ? `${count}х ` : ''}${carrier.shortName} (носитель ${mSpec.shortName})${
       transitAcc
         ? ` — транзит в ${transitAcc}`
         : dirLabel
@@ -619,26 +928,27 @@ export function buildTelegramMessageText(params: {
     }.`;
   }
 
-  const threatLabel = isShahed
-    ? params.munitionId === 'shahed-238'
-      ? 'реактивный «Шахед»'
-      : '«Шахед»'
-    : mSpec?.name ?? 'Воздушная цель';
+  const threatLabel = formatThreatLabelWithCount(params.munitionId, count, isShahed);
 
   const locPart = params.nearCity
     ? `возле ${params.nearCity}`
     : params.raionName
-      ? `через ${params.raionName}`
-      : 'в области';
+      ? isRu
+        ? `над ${params.raionName}`
+        : `через ${params.raionName}`
+      : isRu
+        ? 'в регионе'
+        : 'в области';
 
+  const flyVerb = isGroup ? 'летят' : 'летит';
   const courseParts: string[] = [];
   if (transitAcc) {
     courseParts.push(`транзит в ${transitAcc}`);
   }
   if (params.targetCity) {
-    courseParts.push(`летит на ${params.targetCity}`);
+    courseParts.push(`${flyVerb} на ${params.targetCity}`);
   } else if (!transitAcc) {
-    courseParts.push(dirLabel ? `курс на ${dirLabel}` : 'движение в области');
+    courseParts.push(dirLabel ? `курс на ${dirLabel}` : isRu ? 'движение в регионе' : 'движение в области');
   }
   const courseSuffix = courseParts.join(', ');
 
@@ -650,15 +960,19 @@ export function buildTelegramMessageText(params: {
   if (params.eventKind === 'climbed') {
     const radarStatus =
       params.altitudeMode === 'low'
-        ? 'набрал высоту и появился на радарах ППО (идёт низко)'
-        : 'набрал высоту и уже фиксируется радарами ППО';
-    return `📡 Цель (${isShahed ? '«Шахед»' : threatLabel}) ${approachLocPart} ${radarStatus} — ${courseSuffix}!`;
+        ? isGroup
+          ? `набрали высоту и появились на радарах ${pvoWord} (идут низко)`
+          : `набрала высоту и появилась на радарах ${pvoWord} (идёт низко)`
+        : isGroup
+          ? `набрали высоту и уже фиксируются радарами ${pvoWord}`
+          : `набрала высоту и уже фиксируется радарами ${pvoWord}`;
+    return `📡 ${threatLabel} ${approachLocPart} ${radarStatus} — ${courseSuffix}!`;
   }
 
   if (params.eventKind === 'dropped_radar_lost') {
-    return `🔇 Цель (${isShahed ? '«Шахед»' : threatLabel}) ${approachLocPart} снизилась ОЧЕНЬ НИЗКО и пропала с радаров ППО! ${
+    return `🔇 ${threatLabel} ${approachLocPart} ${isGroup ? 'снизились' : 'снизилась'} ОЧЕНЬ НИЗКО и ${isGroup ? 'пропали' : 'пропала'} с радаров ${pvoWord}! ${
       params.targetCity
-        ? `Летит на ${params.targetCity}.`
+        ? `${isGroup ? 'Летят' : 'Летит'} на ${params.targetCity}.`
         : transitAcc
           ? `Транзит в ${transitAcc}.`
           : dirLabel
@@ -668,13 +982,13 @@ export function buildTelegramMessageText(params: {
   }
 
   if (params.eventKind === 'dropped') {
-    return `📉 Цель (${isShahed ? '«Шахед»' : threatLabel}) ${approachLocPart} снизилась до малой высоты (видна в зоне РЛС) — ${courseSuffix}.`;
+    return `📉 ${threatLabel} ${approachLocPart} ${isGroup ? 'снизились' : 'снизилась'} до малой высоты (в зоне РЛС) — ${courseSuffix}.`;
   }
 
   if (params.eventKind === 'redirect') {
-    return `↪️ ${isShahed ? '«Шахед»' : threatLabel} ${approachLocPart} сменил направление (${
+    return `↪️ ${threatLabel} ${approachLocPart} ${isGroup ? 'сменили направление' : 'сменил направление'} (${
       params.targetCity
-        ? `летит на ${params.targetCity}`
+        ? `${flyVerb} на ${params.targetCity}`
         : transitAcc
           ? `транзит в ${transitAcc}`
           : dirLabel
@@ -685,13 +999,13 @@ export function buildTelegramMessageText(params: {
 
   if (params.altitudeMode === 'ultra-low') {
     return isShahed
-      ? `🛵 «Шахед» замечен ${approachLocPart}, ${courseSuffix}. Идёт ОЧЕНЬ НИЗКО — радары не фиксируют!`
+      ? `🛵 ${threatLabel} ${isGroup ? 'замечены' : 'замечен'} ${approachLocPart}, ${courseSuffix}. ${isGroup ? 'Идут' : 'Идёт'} ОЧЕНЬ НИЗКО — радары не фиксируют!`
       : `⚠️ ${threatLabel} ${approachLocPart} — ${courseSuffix}. Сверхнизкая высота (вне РЛС)!`;
   }
 
   if (params.altitudeMode === 'low') {
     return isShahed
-      ? `🛵 «Шахед» ${approachLocPart}, ${courseSuffix} (идёт низко).`
+      ? `🛵 ${threatLabel} ${approachLocPart}, ${courseSuffix} (${isGroup ? 'идут' : 'идёт'} низко).`
       : `⚠️ ${threatLabel} ${approachLocPart} — ${courseSuffix} (низкая высота).`;
   }
 
@@ -701,11 +1015,11 @@ export function buildTelegramMessageText(params: {
 
   if (params.eventKind === 'tracking') {
     return isShahed
-      ? `🛵 Пролёт «Шахеда» ${approachLocPart} — ${courseSuffix}.`
+      ? `🛵 Пролёт ${threatLabel} ${approachLocPart} — ${courseSuffix}.`
       : `🚀 ${threatLabel} ${approachLocPart} — ${courseSuffix}.`;
   }
 
   return isShahed
-    ? `⚠️ Зафиксирован «Шахед» ${approachLocPart}, ${courseSuffix}.`
-    : `🚀 Зафиксирован ${threatLabel} ${approachLocPart}, ${courseSuffix}.`;
+    ? `⚠️ ${isGroup ? 'Зафиксированы' : 'Зафиксирован'} ${threatLabel} ${approachLocPart}, ${courseSuffix}.`
+    : `🚀 ${isGroup ? 'Зафиксированы' : 'Зафиксирован'} ${threatLabel} ${approachLocPart}, ${courseSuffix}.`;
 }

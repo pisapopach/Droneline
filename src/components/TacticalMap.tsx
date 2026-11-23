@@ -33,6 +33,7 @@ import {
   haversineDistanceKm,
   interpolatePath,
   inverseMaskGeoJson,
+  isBlackOrAzovSeaPoint,
   isFlightPathAllowed,
   russiaGeoJson,
   ukraineGeoJson,
@@ -43,7 +44,6 @@ import {
   getRaionMetaById,
   isPermanentAlertRaionId,
   russiaRegionsGeoJson,
-  ukraineOblastsGeoJson,
   ukraineRaionsGeoJson,
   type RaionMeta,
   type ThreatLevel,
@@ -82,15 +82,19 @@ export type PendingPlacement =
   | { kind: 'strike'; id: MunitionId }
   | { kind: 'pvo'; id: AirDefenseId }
   | { kind: 'infra'; id: BuildingId }
-  | { kind: 'airfield' };
+  | { kind: 'airfield' }
+  | { kind: 'airfield-ua' }
+  | { kind: 'ship' };
 
 export interface PlacedAirfield {
   id: string;
   name: string;
   presetId?: string;
+  faction?: 'RU' | 'UA';
   lat: number;
   lng: number;
   selectedAircraftId: RussianAircraftId;
+  availableAircraftIds?: RussianAircraftId[];
   salvoCount: number;
   isAi?: boolean;
 }
@@ -105,6 +109,7 @@ export interface PlacedLauncher {
   lastLaunchAt: number;
   headingDeg: number;
   isAi?: boolean;
+  isNavalShip?: boolean;
 }
 
 export interface PlacedAirDefense {
@@ -151,6 +156,7 @@ export interface ActiveFlight {
   lastTelegramRaion?: string;
   lastTelegramTransitOblast?: string;
   lastTelegramTargetCity?: string;
+  lastTelegramCount?: number;
   pendingTelegramEvent?: TelegramIntelEventKind;
   waypoints: RoutePoint[]; // smoothed route points [start, ..., end]
   rawWaypoints: RoutePoint[]; // original clicked waypoints for turn markers
@@ -162,6 +168,7 @@ export interface ActiveFlight {
   visualHeadingDeg: number;
   totalDistanceKm: number;
   coveredKm: number;
+  lifetimeFlownKm?: number;
   ageSec: number;
   trail: RoutePoint[];
   bombDropThresholds?: number[];
@@ -282,6 +289,7 @@ export interface TelegramIntelPayload {
   alertSubtype?: TelegramAlertSubtype;
   alertRaionNames?: string[];
   bearingDeg?: number;
+  count?: number;
 }
 
 export type MapStyleId = 'arcgis-sat' | 'google-sat' | 'arcgis-topo';
@@ -380,9 +388,12 @@ interface TacticalMapProps {
   alertHoldoverSec: number;
   clearSignal: number;
   focusCoords: { lat: number; lng: number; zoom?: number } | null;
+  isMobile?: boolean;
+  mobileSteerDir?: -1 | 0 | 1;
   onChangeMapStyle: (style: MapStyleId) => void;
   onPlaceStrikeLauncher: (munitionId: MunitionId, lat: number, lng: number) => void;
-  onPlaceAirfield: (lat: number, lng: number) => void;
+  onPlaceNavalShip: (lat: number, lng: number) => void;
+  onPlaceAirfield: (lat: number, lng: number, faction?: 'RU' | 'UA') => void;
   onPlaceAirDefense: (airDefenseId: AirDefenseId, lat: number, lng: number) => void;
   onPlaceBuilding: (buildingId: BuildingId, lat: number, lng: number) => void;
   onSelectLauncher: (id: string | null) => void;
@@ -474,10 +485,10 @@ function getInterceptHitChance(
       else base = 0.78;
       break;
     case 'mg-pickup':
-      if (effProfile === 'kab') base = 0.14;
-      else if (effProfile === 'cruise' || effProfile === 'airstrike') base = 0.22;
-      else if (effProfile === 'jet-drone') base = 0.42;
-      else base = 0.72;
+      if (effProfile === 'kab') base = 0.03;
+      else if (effProfile === 'cruise' || effProfile === 'airstrike') base = 0.05;
+      else if (effProfile === 'jet-drone') base = 0.09;
+      else base = 0.16;
       break;
     default:
       base = 0.75;
@@ -560,6 +571,10 @@ function formatLocationLabel(lat: number, lng: number): string {
   return `${lat.toFixed(2)}, ${lng.toFixed(2)}`;
 }
 
+function getIntelChannelRegion(meta: RaionMeta): string {
+  return meta.oblast === 'Россия' ? meta.name : meta.oblast;
+}
+
 function getFlightAltitudeMode(flt: {
   altitudeMode?: AltitudeMode;
   lowAltitude?: boolean;
@@ -579,6 +594,13 @@ function isManuallySteerableFlight(flt: {
 }): boolean {
   if (flt.isReturnToBase || flt.carrierAircraftId) return false;
   return MUNITION_BY_ID[flt.munitionId].profile !== 'airstrike';
+}
+
+function isReadOnlyAiTarget(
+  flt: { isAiStrike?: boolean },
+  mode: 'sandbox' | 'ai',
+): boolean {
+  return mode === 'ai' && Boolean(flt.isAiStrike);
 }
 
 function computePointAheadKm(
@@ -634,8 +656,11 @@ export function TacticalMap({
   alertHoldoverSec,
   clearSignal,
   focusCoords,
+  isMobile = false,
+  mobileSteerDir = 0,
   onChangeMapStyle,
   onPlaceStrikeLauncher,
+  onPlaceNavalShip,
   onPlaceAirfield,
   onPlaceAirDefense,
   onPlaceBuilding,
@@ -674,7 +699,6 @@ export function TacticalMap({
   const labelsLayerRef = useRef<SmoothCachedTileLayer | null>(null);
   const raionsLayerRef = useRef<L.GeoJSON | null>(null);
   const russiaRegionsLayerRef = useRef<L.GeoJSON | null>(null);
-  const oblastsLayerRef = useRef<L.GeoJSON | null>(null);
   const occupiedLayerRef = useRef<L.GeoJSON | null>(null);
   const raionPolygonMapRef = useRef<Map<string, L.Path>>(new Map());
   const activeThreatsRef = useRef<Map<string, ThreatLevel>>(new Map());
@@ -700,6 +724,7 @@ export function TacticalMap({
   const pvoLaunchFlashesRef = useRef<PvoLaunchPlume[]>([]);
   const explosionsRef = useRef<ActiveExplosion[]>([]);
   const pvoCooldownsRef = useRef<Record<string, number>>({});
+  const mgBurstRemainingRef = useRef<Record<string, number>>({});
   const mobilePvoStateRef = useRef<
     Record<
       string,
@@ -784,9 +809,14 @@ export function TacticalMap({
   alertRadiusKmRef.current = alertRadiusKm;
   const alertHoldoverSecRef = useRef(alertHoldoverSec);
   alertHoldoverSecRef.current = alertHoldoverSec;
+  const isMobileRef = useRef(isMobile);
+  isMobileRef.current = isMobile;
+  const mobileSteerDirRef = useRef<-1 | 0 | 1>(mobileSteerDir);
+  mobileSteerDirRef.current = mobileSteerDir;
 
   const callbacksRef = useRef({
     onPlaceStrikeLauncher,
+    onPlaceNavalShip,
     onPlaceAirfield,
     onPlaceAirDefense,
     onPlaceBuilding,
@@ -820,6 +850,7 @@ export function TacticalMap({
   });
   callbacksRef.current = {
     onPlaceStrikeLauncher,
+    onPlaceNavalShip,
     onPlaceAirfield,
     onPlaceAirDefense,
     onPlaceBuilding,
@@ -941,6 +972,7 @@ export function TacticalMap({
     pvoLaunchFlashesRef.current = [];
     explosionsRef.current = [];
     pvoCooldownsRef.current = {};
+    mgBurstRemainingRef.current = {};
     mobilePvoStateRef.current = {};
     followCamFlightIdRef.current = null;
     keysHeldRef.current = { a: false, d: false };
@@ -1012,7 +1044,7 @@ export function TacticalMap({
   useEffect(() => {
     if (!flightAltitudeCommand) return;
     const flt = flightsRef.current.find((f) => f.id === flightAltitudeCommand.id);
-    if (!flt || flt.isReturnToBase) return;
+    if (!flt || flt.isReturnToBase || isReadOnlyAiTarget(flt, gameModeRef.current)) return;
     const prevAlt = getFlightAltitudeMode(flt);
     const nextAlt = flightAltitudeCommand.altitudeMode;
     if (prevAlt === nextAlt) return;
@@ -1054,7 +1086,11 @@ export function TacticalMap({
     const isActiveSteerableSelected = () => {
       if (!selectedFlightRef.current) return false;
       const flt = flightsRef.current.find((f) => f.id === selectedFlightRef.current);
-      return Boolean(flt && isManuallySteerableFlight(flt));
+      return Boolean(
+        flt &&
+          isManuallySteerableFlight(flt) &&
+          !isReadOnlyAiTarget(flt, gameModeRef.current),
+      );
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return;
@@ -1078,7 +1114,11 @@ export function TacticalMap({
         e.stopPropagation();
       } else if (e.code === 'Space' && selectedFlightRef.current) {
         const flt = flightsRef.current.find((f) => f.id === selectedFlightRef.current);
-        if (flt && isManuallySteerableFlight(flt)) {
+        if (
+          flt &&
+          isManuallySteerableFlight(flt) &&
+          !isReadOnlyAiTarget(flt, gameModeRef.current)
+        ) {
           e.preventDefault();
           pendingDetonateFlightIdRef.current = flt.id;
         }
@@ -1338,6 +1378,14 @@ export function TacticalMap({
       callbacksRef.current.onWarning('Выберите маршрут ракет подальше от точки пуска');
       return;
     }
+    const missileMaxKm = missileSpec.kabMaxRangeKm ?? missileSpec.maxRangeKm;
+    if (missileMaxKm && missileTotalKm > missileMaxKm) {
+      soundFx.playBlocked();
+      callbacksRef.current.onWarning(
+        `Дальность ${missileSpec.shortName} от точки сброса ограничена ${missileMaxKm} км (${Math.round(missileTotalKm)} км)`,
+      );
+      return;
+    }
 
     const jetDistKm = haversineDistanceKm(airfield.lat, airfield.lng, launchPt.lat, launchPt.lng);
     const jetBearingDeg = computeBearingDeg(airfield.lat, airfield.lng, launchPt.lat, launchPt.lng);
@@ -1408,18 +1456,21 @@ export function TacticalMap({
     if (applyFlightRouteSignal === 0) return;
     const flt = flightsRef.current.find((f) => f.id === selectedFlightRef.current);
     const wps = flightWaypointsRef.current;
-    if (!flt || wps.length === 0) return;
+    if (!flt || wps.length === 0 || isReadOnlyAiTarget(flt, gameModeRef.current)) return;
 
     const newRaw = [{ lat: flt.lat, lng: flt.lng }, ...wps];
     const smoothPath = buildSmoothRoute(newRaw);
     const totalKm = Math.max(1, computeRouteLengthKm(smoothPath));
     const spec = MUNITION_BY_ID[flt.munitionId];
-    if (spec.maxRangeKm && totalKm > spec.maxRangeKm) {
-      soundFx.playBlocked();
-      callbacksRef.current.onWarning(
-        `Дальность КАБ ограничена ${spec.maxRangeKm} км (новый участок ${Math.round(totalKm)} км)`,
-      );
-      return;
+    if (spec.maxRangeKm) {
+      const remRangeKm = Math.max(0, spec.maxRangeKm - (flt.lifetimeFlownKm ?? flt.coveredKm));
+      if (totalKm > remRangeKm) {
+        soundFx.playBlocked();
+        callbacksRef.current.onWarning(
+          `Дальность КАБ ограничена ${spec.maxRangeKm} км (остаток ${Math.round(remRangeKm)} км)`,
+        );
+        return;
+      }
     }
 
     const bearingDeg = computeBearingDeg(
@@ -1441,6 +1492,7 @@ export function TacticalMap({
         })
       : undefined;
 
+    flt.lifetimeFlownKm = flt.lifetimeFlownKm ?? flt.coveredKm;
     flt.waypoints = smoothPath;
     flt.rawWaypoints = newRaw;
     flt.segmentIndex = 0;
@@ -1672,16 +1724,13 @@ export function TacticalMap({
     const map = mapRef.current;
     const raionsLayer = raionsLayerRef.current;
     const russiaRegionsLayer = russiaRegionsLayerRef.current;
-    const oblastsLayer = oblastsLayerRef.current;
-    if (!map || !raionsLayer || !oblastsLayer) return;
+    if (!map || !raionsLayer) return;
     if (showRaions) {
       if (!map.hasLayer(raionsLayer)) raionsLayer.addTo(map);
       if (russiaRegionsLayer && !map.hasLayer(russiaRegionsLayer)) russiaRegionsLayer.addTo(map);
-      if (!map.hasLayer(oblastsLayer)) oblastsLayer.addTo(map);
     } else {
       if (map.hasLayer(raionsLayer)) map.removeLayer(raionsLayer);
       if (russiaRegionsLayer && map.hasLayer(russiaRegionsLayer)) map.removeLayer(russiaRegionsLayer);
-      if (map.hasLayer(oblastsLayer)) map.removeLayer(oblastsLayer);
     }
   }, [showRaions]);
 
@@ -1822,18 +1871,6 @@ export function TacticalMap({
     raionPolygonMapRef.current = raionPolyMap;
     raionsLayerRef.current = raionsLayer;
 
-    const oblastsLayer = L.geoJSON(ukraineOblastsGeoJson, {
-      pane: 'oblastPane',
-      interactive: false,
-      style: {
-        color: '#FFFFFF',
-        weight: 1.4,
-        opacity: 0.78,
-        fill: false,
-      },
-    });
-    oblastsLayerRef.current = oblastsLayer;
-
     if (showFrontline) {
       occupiedLayer.addTo(map);
     }
@@ -1841,7 +1878,6 @@ export function TacticalMap({
     if (showRaions) {
       raionsLayer.addTo(map);
       russiaRegionsLayer.addTo(map);
-      oblastsLayer.addTo(map);
     }
 
     L.geoJSON(ukraineGeoJson, {
@@ -1879,7 +1915,7 @@ export function TacticalMap({
 
     const findHitLauncher = (pt: L.Point): PlacedLauncher | null => {
       let best: PlacedLauncher | null = null;
-      let bestDist = 26;
+      let bestDist = isMobileRef.current ? 36 : 26;
       for (const l of launchersRef.current) {
         const lp = map.latLngToContainerPoint([l.lat, l.lng]);
         const d = Math.hypot(lp.x - pt.x, lp.y - pt.y);
@@ -1898,7 +1934,7 @@ export function TacticalMap({
 
     const findHitPvo = (pt: L.Point, excludeRadars = false): PlacedAirDefense | null => {
       let best: PlacedAirDefense | null = null;
-      let bestDist = 24;
+      let bestDist = isMobileRef.current ? 34 : 24;
       for (const p of airDefensesRef.current) {
         if (excludeRadars && AIR_DEFENSE_BY_ID[p.airDefenseId].isRadar) continue;
         const pos = getPvoLiveCoords(p);
@@ -1914,7 +1950,7 @@ export function TacticalMap({
 
     const findHitAirfield = (pt: L.Point): PlacedAirfield | null => {
       let best: PlacedAirfield | null = null;
-      let bestDist = 28;
+      let bestDist = isMobileRef.current ? 38 : 28;
       for (const a of airfieldsRef.current) {
         const ap = map.latLngToContainerPoint([a.lat, a.lng]);
         const d = Math.hypot(ap.x - pt.x, ap.y - pt.y);
@@ -1928,7 +1964,7 @@ export function TacticalMap({
 
     const findHitBuilding = (pt: L.Point): PlacedBuilding | null => {
       let best: PlacedBuilding | null = null;
-      let bestDist = 24 * Math.max(0.7, buildingScaleRef.current);
+      let bestDist = (isMobileRef.current ? 34 : 24) * Math.max(0.7, buildingScaleRef.current);
       for (const b of buildingsRef.current) {
         const bp = map.latLngToContainerPoint([b.lat, b.lng]);
         const d = Math.hypot(bp.x - pt.x, bp.y - pt.y);
@@ -1960,7 +1996,7 @@ export function TacticalMap({
 
     const findHitFlight = (pt: L.Point): ActiveFlight | null => {
       let best: ActiveFlight | null = null;
-      let bestDist = 24;
+      let bestDist = isMobileRef.current ? 36 : 24;
       for (const flt of flightsRef.current) {
         if (flt.isReturnToBase || !isFlightVisibleToUser(flt)) continue;
         const fp = map.latLngToContainerPoint([flt.lat, flt.lng]);
@@ -2051,6 +2087,7 @@ export function TacticalMap({
             dist: Math.hypot(pp.x - pt.x, pp.y - pt.y),
             remove: () => {
               delete mobilePvoStateRef.current[hitP.id];
+              delete mgBurstRemainingRef.current[hitP.id];
               callbacksRef.current.onRemovePvo(hitP.id);
             },
           });
@@ -2171,13 +2208,24 @@ export function TacticalMap({
         setHoveredRaion((prev) => (prev === null ? prev : null));
       }
 
+      const selectedFlightIsReadOnlyAi = selectedFlightRef.current
+        ? (() => {
+            const sf = flightsRef.current.find((f) => f.id === selectedFlightRef.current);
+            return Boolean(sf && isReadOnlyAiTarget(sf, gameModeRef.current));
+          })()
+        : false;
+
       if (rightDragRef.current.active) {
         container.style.cursor = 'grabbing';
       } else if (pendingRef.current || plottingRef.current || plottingFlightRef.current) {
         container.style.cursor = 'crosshair';
       } else if ((hitL && !hitL.isAi) || (hitAf && !hitAf.isAi) || hitF) {
         container.style.cursor = 'pointer';
-      } else if (selectedRef.current || selectedAirfieldRef.current || selectedFlightRef.current) {
+      } else if (
+        selectedRef.current ||
+        selectedAirfieldRef.current ||
+        (selectedFlightRef.current && !selectedFlightIsReadOnlyAi)
+      ) {
         container.style.cursor = 'crosshair';
       } else {
         container.style.cursor = '';
@@ -2198,7 +2246,7 @@ export function TacticalMap({
       const pt = map.latLngToContainerPoint(ev.latlng);
       const { lat, lng } = ev.latlng;
 
-      // 1. Place pending launcher, airfield, ППО unit, or infrastructure building
+      // 1. Place pending launcher, naval ship, airfield, ППО unit, or infrastructure building
       if (pendingRef.current) {
         if (pendingRef.current.kind === 'strike') {
           const spec = MUNITION_BY_ID[pendingRef.current.id];
@@ -2212,6 +2260,16 @@ export function TacticalMap({
           }
           soundFx.playPlaceLauncher();
           callbacksRef.current.onPlaceStrikeLauncher(pendingRef.current.id, lat, lng);
+        } else if (pendingRef.current.kind === 'ship') {
+          if (!isBlackOrAzovSeaPoint(lat, lng)) {
+            soundFx.playBlocked();
+            callbacksRef.current.onWarning(
+              'Корабль ВМФ можно поставить только в открытом Чёрном или Азовском море',
+            );
+            return;
+          }
+          soundFx.playPlaceLauncher();
+          callbacksRef.current.onPlaceNavalShip(lat, lng);
         } else if (pendingRef.current.kind === 'airfield') {
           const placeCheck = isFactionPlacementAllowed('RU', lat, lng);
           if (!placeCheck.allowed) {
@@ -2222,7 +2280,18 @@ export function TacticalMap({
             return;
           }
           soundFx.playPlaceLauncher();
-          callbacksRef.current.onPlaceAirfield(lat, lng);
+          callbacksRef.current.onPlaceAirfield(lat, lng, 'RU');
+        } else if (pendingRef.current.kind === 'airfield-ua') {
+          const placeCheck = isFactionPlacementAllowed('UA', lat, lng);
+          if (!placeCheck.allowed) {
+            soundFx.playBlocked();
+            callbacksRef.current.onWarning(
+              placeCheck.reason ?? 'Аэродром ВСУ можно поставить только на подконтрольной территории Украины',
+            );
+            return;
+          }
+          soundFx.playPlaceLauncher();
+          callbacksRef.current.onPlaceAirfield(lat, lng, 'UA');
         } else {
           const territory = getTerritoryAt(lat, lng);
           if (!territory) {
@@ -2299,8 +2368,9 @@ export function TacticalMap({
       // 3. Handle selected airborne flight (switch target / add waypoint / 1-click mid-flight redirect)
       const activateFlightSelection = (targetFlt: ActiveFlight) => {
         soundFx.playSelectLauncher();
-        const steerable = isManuallySteerableFlight(targetFlt);
-        if (steerable) {
+        const readOnlyAi = isReadOnlyAiTarget(targetFlt, gameModeRef.current);
+        const steerable = !readOnlyAi && isManuallySteerableFlight(targetFlt);
+        if (steerable || readOnlyAi) {
           followCamFlightIdRef.current = targetFlt.id;
           callbacksRef.current.onFollowCamChange(true);
           zoomAnimRef.current.active = false;
@@ -2334,6 +2404,9 @@ export function TacticalMap({
           callbacksRef.current.onSelectFlight(null);
           return;
         }
+        if (isReadOnlyAiTarget(flt, gameModeRef.current)) {
+          return;
+        }
 
         const hitB = findHitBuilding(pt);
         const hitP = !hitB ? findHitPvo(pt, true) : null;
@@ -2360,15 +2433,16 @@ export function TacticalMap({
           }
           const spec = MUNITION_BY_ID[flt.munitionId];
           if (spec.maxRangeKm) {
+            const remRangeKm = Math.max(0, spec.maxRangeKm - (flt.lifetimeFlownKm ?? flt.coveredKm));
             const nextTotalKm = computeRouteLengthKm([
               { lat: flt.lat, lng: flt.lng },
               ...wps,
               { lat: targetLat, lng: targetLng },
             ]);
-            if (nextTotalKm > spec.maxRangeKm) {
+            if (nextTotalKm > remRangeKm) {
               soundFx.playBlocked();
               callbacksRef.current.onWarning(
-                `Дальность КАБ ограничена ${spec.maxRangeKm} км (получится ${Math.round(nextTotalKm)} км)`,
+                `Дальность КАБ ограничена ${spec.maxRangeKm} км (осталось ${Math.round(remRangeKm)} км)`,
               );
               return;
             }
@@ -2399,12 +2473,15 @@ export function TacticalMap({
           return;
         }
         const spec = MUNITION_BY_ID[flt.munitionId];
-        if (spec.maxRangeKm && distKm > spec.maxRangeKm) {
-          soundFx.playBlocked();
-          callbacksRef.current.onWarning(
-            `Дальность КАБ ограничена ${spec.maxRangeKm} км (до точки ${Math.round(distKm)} км)`,
-          );
-          return;
+        if (spec.maxRangeKm) {
+          const remRangeKm = Math.max(0, spec.maxRangeKm - (flt.lifetimeFlownKm ?? flt.coveredKm));
+          if (distKm > remRangeKm) {
+            soundFx.playBlocked();
+            callbacksRef.current.onWarning(
+              `Дальность КАБ ограничена ${spec.maxRangeKm} км (остаток ${Math.round(remRangeKm)} км)`,
+            );
+            return;
+          }
         }
 
         const newPts: RoutePoint[] = [
@@ -2412,6 +2489,7 @@ export function TacticalMap({
           { lat: targetLat, lng: targetLng },
         ];
         const newBearing = computeBearingDeg(flt.lat, flt.lng, targetLat, targetLng);
+        flt.lifetimeFlownKm = flt.lifetimeFlownKm ?? flt.coveredKm;
         flt.waypoints = newPts;
         flt.rawWaypoints = newPts;
         flt.segmentIndex = 0;
@@ -2527,6 +2605,21 @@ export function TacticalMap({
             missilePathCheck.reason ?? 'Полёты разрешены только по территории Украины и России',
           );
           return;
+        }
+        const missileMaxKm = missileSpec.kabMaxRangeKm ?? missileSpec.maxRangeKm;
+        if (missileMaxKm) {
+          const candidateTotalKm = computeRouteLengthKm([
+            curLaunchPt,
+            ...mWps,
+            { lat: targetLat, lng: targetLng },
+          ]);
+          if (candidateTotalKm > missileMaxKm) {
+            soundFx.playBlocked();
+            callbacksRef.current.onWarning(
+              `Дальность ${missileSpec.shortName} от точки пуска ограничена ${missileMaxKm} км (получится ${Math.round(candidateTotalKm)} км)`,
+            );
+            return;
+          }
         }
 
         soundFx.playSelectLauncher();
@@ -3000,18 +3093,22 @@ export function TacticalMap({
         });
 
         const expRaion = getRaionAt(lat, lng);
-        if (expRaion && getTelegramChannelByOblast(expRaion.oblast)) {
-          const nearInfo = findNearestSettlementInfo(lat, lng);
-          const nearCity = nearInfo.distKm <= 48 ? nearInfo.fullLabel : undefined;
-          callbacksRef.current.onTelegramIntel({
-            flightId: expId,
-            oblast: expRaion.oblast,
-            raionName: expRaion.name,
-            munitionId,
-            nearCity,
-            altitudeMode: 'normal',
-            eventKind: 'explosion',
-          });
+        if (expRaion) {
+          const regionKey = getIntelChannelRegion(expRaion);
+          const chMeta = getTelegramChannelByOblast(regionKey);
+          if (chMeta) {
+            const nearInfo = findNearestSettlementInfo(lat, lng, chMeta.country);
+            const nearCity = nearInfo.distKm <= 48 ? nearInfo.fullLabel : undefined;
+            callbacksRef.current.onTelegramIntel({
+              flightId: expId,
+              oblast: regionKey,
+              raionName: expRaion.oblast === 'Россия' ? undefined : expRaion.name,
+              munitionId,
+              nearCity,
+              altitudeMode: 'normal',
+              eventKind: 'explosion',
+            });
+          }
         }
 
         totalExplosionsRef.current += 1;
@@ -3124,6 +3221,7 @@ export function TacticalMap({
         if (munitionId === 'iskander' || munitionId === 'sapsan' || munitionId === 'kh22') return 1.55;
         if (munitionId === 'flamingo') return 1.45;
         if (munitionId === 'kh101' || munitionId === 'kalibr' || munitionId === 'kh69') return 1.25;
+        if (munitionId === 'banderol') return 1.1;
         if (munitionId === 'neptune' || munitionId === 'peklo' || munitionId === 'palyanytsya') return 1.15;
         return 0.92;
       };
@@ -3155,13 +3253,14 @@ export function TacticalMap({
           const probe = computePointAheadKm(flt.lat, flt.lng, flt.bearingDeg, dKm);
           const probeRaion = getRaionAt(probe.lat, probe.lng);
           if (!probeRaion) continue;
+          const probeRegion = getIntelChannelRegion(probeRaion);
           const probeOblast =
-            probeRaion.oblast === 'м. Київ'
+            probeRegion === 'м. Київ'
               ? 'Київська область'
-              : probeRaion.oblast === 'м. Севастополь'
+              : probeRegion === 'м. Севастополь'
                 ? 'АР Крим'
-                : probeRaion.oblast;
-          if (probeOblast !== normCur && getTelegramChannelByOblast(probeRaion.oblast)) {
+                : probeRegion;
+          if (probeOblast !== normCur && getTelegramChannelByOblast(probeRegion)) {
             return probeOblast;
           }
         }
@@ -3192,7 +3291,8 @@ export function TacticalMap({
               ? 'АР Крим'
               : o;
         const finalRaion = getRaionAt(finalDest.lat, finalDest.lng);
-        if (finalRaion && normOblast(finalRaion.oblast) !== normOblast(currentOblast)) {
+        const finalRegion = finalRaion ? getIntelChannelRegion(finalRaion) : undefined;
+        if (finalRegion && normOblast(finalRegion) !== normOblast(currentOblast)) {
           return undefined;
         }
 
@@ -3200,9 +3300,20 @@ export function TacticalMap({
         const speed = MUNITION_BY_ID[flt.munitionId].simSpeedKmPerSec;
         const approachRadiusKm = speed >= 40 ? 95 : 68;
         if (distToFinalKm > approachRadiusKm) return undefined;
-        const finalNear = findNearestSettlementInfo(finalDest.lat, finalDest.lng);
+        const chCountry = getTelegramChannelByOblast(currentOblast)?.country;
+        const finalNear = findNearestSettlementInfo(finalDest.lat, finalDest.lng, chCountry);
         if (finalNear.distKm > 28) return undefined;
         return finalNear.fullLabel;
+      };
+
+      const sameClusterThreat = (a: ActiveFlight, b: ActiveFlight): boolean => {
+        if (a.carrierAircraftId || b.carrierAircraftId) {
+          return Boolean(a.carrierAircraftId && a.carrierAircraftId === b.carrierAircraftId);
+        }
+        if (isShahedMunition(a.munitionId) && isShahedMunition(b.munitionId)) {
+          return true;
+        }
+        return a.munitionId === b.munitionId;
       };
 
       const emitTelegramForOblast = (
@@ -3212,14 +3323,15 @@ export function TacticalMap({
         eventKind: TelegramIntelEventKind,
         forceImmediate = false,
       ) => {
-        if (!getTelegramChannelByOblast(oblast)) return;
+        const channelMeta = getTelegramChannelByOblast(oblast);
+        if (!channelMeta) return;
         const isAltitudeEvent =
           eventKind === 'climbed' ||
           eventKind === 'dropped' ||
           eventKind === 'dropped_radar_lost';
 
         const altMode = getFlightAltitudeMode(flt);
-        const nearInfo = findNearestSettlementInfo(flt.lat, flt.lng);
+        const nearInfo = findNearestSettlementInfo(flt.lat, flt.lng, channelMeta.country);
         const nearCity = nearInfo.distKm <= 42 ? nearInfo.fullLabel : undefined;
         const targetCity = resolveApproachingTargetCity(flt, oblast);
         const transitOblast = resolveTransitOblast(flt, oblast);
@@ -3235,6 +3347,21 @@ export function TacticalMap({
           if (flt.ageSec < 2.3 && flt.totalDistanceKm > 35) return;
         }
 
+        // Group nearby targets of the same class heading in roughly the same direction (e.g. 2х, 3х)
+        const cluster: ActiveFlight[] = isAltitudeEvent
+          ? [flt]
+          : flightsRef.current.filter((f) => {
+              if (f.id === flt.id) return true;
+              if (f.isReturnToBase || !isFlightDetected(f)) return false;
+              if (!sameClusterThreat(flt, f)) return false;
+              if (haversineDistanceKm(flt.lat, flt.lng, f.lat, f.lng) > 55) return false;
+              const angleDiff = Math.abs(normalizeAngleDeltaDeg(f.bearingDeg - flt.bearingDeg));
+              if (angleDiff <= 70) return true;
+              const fRaion = getRaionAt(f.lat, f.lng);
+              return Boolean(fRaion && getIntelChannelRegion(fRaion) === oblast);
+            });
+        const count = Math.max(1, cluster.length);
+
         const firstInOblast = !flt.reportedOblasts?.[oblast];
         const secSinceLast =
           flt.lastTelegramAtSec !== undefined ? flt.ageSec - flt.lastTelegramAtSec : Infinity;
@@ -3242,6 +3369,7 @@ export function TacticalMap({
         const transitChanged =
           flt.lastTelegramTransitOblast !== transitOblast && flt.lastTelegramAtSec !== undefined;
         const targetCityChanged = Boolean(targetCity && flt.lastTelegramTargetCity !== targetCity);
+        const groupEscalated = !isAltitudeEvent && count > 1 && count > (flt.lastTelegramCount ?? 1);
 
         if (isAltitudeEvent) {
           // Altitude updates always report promptly
@@ -3249,6 +3377,8 @@ export function TacticalMap({
           if (secSinceLast < 1.1 && !firstInOblast) return;
         } else if (firstInOblast) {
           // Emit upon entering a new oblast once initial stabilization passes
+        } else if (groupEscalated) {
+          if (secSinceLast < 1.2) return;
         } else if (targetCityChanged) {
           if (secSinceLast < 1.1) return;
         } else if (raionChanged || transitChanged) {
@@ -3257,16 +3387,19 @@ export function TacticalMap({
           if (secSinceLast < 4.5) return;
         }
 
-        flt.reportedOblasts = { ...(flt.reportedOblasts ?? {}), [oblast]: true };
-        flt.lastTelegramAtSec = flt.ageSec;
-        flt.lastTelegramRaion = raionName;
-        flt.lastTelegramTransitOblast = transitOblast;
-        flt.lastTelegramTargetCity = targetCity;
-        flt.lastSteadyHeadingDeg = flt.bearingDeg;
+        for (const member of cluster) {
+          member.reportedOblasts = { ...(member.reportedOblasts ?? {}), [oblast]: true };
+          member.lastTelegramAtSec = member.ageSec;
+          member.lastTelegramRaion = raionName;
+          member.lastTelegramTransitOblast = transitOblast;
+          member.lastTelegramTargetCity = targetCity;
+          member.lastSteadyHeadingDeg = member.bearingDeg;
+          member.lastTelegramCount = count;
+        }
 
         callbacksRef.current.onTelegramIntel({
           oblast,
-          raionName,
+          raionName: raionName || undefined,
           munitionId: flt.munitionId,
           carrierAircraftId: flt.carrierAircraftId,
           targetCity,
@@ -3276,6 +3409,7 @@ export function TacticalMap({
           eventKind: firstInOblast && eventKind === 'tracking' ? 'entered' : eventKind,
           bearingDeg: flt.bearingDeg,
           flightId: flt.id,
+          count,
         });
       };
 
@@ -3314,9 +3448,14 @@ export function TacticalMap({
           flt.lastSteadyHeadingDeg = flt.bearingDeg;
         }
         const canManualSteer =
-          selectedFlightRef.current === flt.id && isManuallySteerableFlight(flt);
+          selectedFlightRef.current === flt.id &&
+          isManuallySteerableFlight(flt) &&
+          !isReadOnlyAiTarget(flt, gameModeRef.current);
+        const keySteerDir = (keysHeldRef.current.d ? 1 : 0) - (keysHeldRef.current.a ? 1 : 0);
         const steerDir = canManualSteer
-          ? (keysHeldRef.current.d ? 1 : 0) - (keysHeldRef.current.a ? 1 : 0)
+          ? keySteerDir !== 0
+            ? keySteerDir
+            : mobileSteerDirRef.current
           : 0;
         if (steerDir !== 0) {
           flt.manualSteering = true;
@@ -3331,21 +3470,41 @@ export function TacticalMap({
 
         let finished = false;
         if (flt.manualSteering) {
-          const stepKm = speedKmPerSec * timeScaleRef.current * dt;
+          const flownBefore = flt.lifetimeFlownKm ?? flt.coveredKm;
+          let stepKm = speedKmPerSec * timeScaleRef.current * dt;
+          if (spec.maxRangeKm) {
+            const remRangeKm = Math.max(0, spec.maxRangeKm - flownBefore);
+            if (stepKm >= remRangeKm) {
+              stepKm = remRangeKm;
+              finished = true;
+            }
+          }
           let nextPt = computePointAheadKm(flt.lat, flt.lng, flt.bearingDeg, stepKm);
-          if (getTerritoryAt(nextPt.lat, nextPt.lng) === null) {
+          if (
+            getTerritoryAt(nextPt.lat, nextPt.lng) === null &&
+            !isBlackOrAzovSeaPoint(nextPt.lat, nextPt.lng)
+          ) {
             flt.bearingDeg = (flt.bearingDeg + 145) % 360;
             nextPt = computePointAheadKm(flt.lat, flt.lng, flt.bearingDeg, stepKm);
           }
           flt.lat = nextPt.lat;
           flt.lng = nextPt.lng;
-          flt.coveredKm += stepKm;
-          const lookAhead = computePointAheadKm(flt.lat, flt.lng, flt.bearingDeg, 60);
+          flt.lifetimeFlownKm = flownBefore + stepKm;
+          if (spec.maxRangeKm) {
+            flt.coveredKm = flt.lifetimeFlownKm;
+            flt.totalDistanceKm = spec.maxRangeKm;
+          } else {
+            flt.coveredKm += stepKm;
+            flt.totalDistanceKm = 60;
+          }
+          const lookKm = spec.maxRangeKm
+            ? Math.max(1, Math.min(60, spec.maxRangeKm - flt.lifetimeFlownKm))
+            : 60;
+          const lookAhead = computePointAheadKm(flt.lat, flt.lng, flt.bearingDeg, lookKm);
           flt.waypoints = [{ lat: flt.lat, lng: flt.lng }, lookAhead];
           flt.rawWaypoints = flt.waypoints;
           flt.segmentIndex = 0;
           flt.segmentProgress = 0;
-          flt.totalDistanceKm = 60;
           flt.visualHeadingDeg = slewAngleDeg(
             flt.visualHeadingDeg,
             flt.bearingDeg,
@@ -3374,6 +3533,13 @@ export function TacticalMap({
           }
         } else {
           let remainingStepKm = speedKmPerSec * timeScaleRef.current * dt;
+          if (spec.maxRangeKm) {
+            const flownBefore = flt.lifetimeFlownKm ?? flt.coveredKm;
+            const remRangeKm = Math.max(0, spec.maxRangeKm - flownBefore);
+            if (remainingStepKm >= remRangeKm) {
+              remainingStepKm = remRangeKm;
+            }
+          }
 
           while (remainingStepKm > 0 && !finished) {
             const a = flt.waypoints[flt.segmentIndex];
@@ -3389,6 +3555,7 @@ export function TacticalMap({
               const consumedKm = (1 - flt.segmentProgress) * segKm;
               remainingStepKm -= consumedKm;
               flt.coveredKm += consumedKm;
+              flt.lifetimeFlownKm = (flt.lifetimeFlownKm ?? 0) + consumedKm;
 
               if (flt.segmentIndex + 2 < flt.waypoints.length) {
                 flt.segmentIndex += 1;
@@ -3405,8 +3572,14 @@ export function TacticalMap({
             } else {
               flt.segmentProgress += progressStep;
               flt.coveredKm += remainingStepKm;
+              flt.lifetimeFlownKm = (flt.lifetimeFlownKm ?? 0) + remainingStepKm;
               remainingStepKm = 0;
               flt.bearingDeg = computeBearingDeg(a.lat, a.lng, b.lat, b.lng);
+            }
+
+            if (spec.maxRangeKm && (flt.lifetimeFlownKm ?? flt.coveredKm) >= spec.maxRangeKm) {
+              finished = true;
+              break;
             }
           }
 
@@ -3689,7 +3862,7 @@ export function TacticalMap({
           ) {
             flt.midFlightRedirectDone = true;
             if (
-              ['shahed-136', 'shahed-238', 'kalibr', 'kh101', 'kh69'].includes(flt.munitionId) &&
+              ['shahed-136', 'shahed-238', 'banderol', 'kalibr', 'kh101', 'kh69'].includes(flt.munitionId) &&
               Math.random() < 0.45
             ) {
               const altBuildings = buildingsRef.current.filter(
@@ -3817,8 +3990,8 @@ export function TacticalMap({
           if (curRaion) {
             emitTelegramForOblast(
               flt,
-              curRaion.oblast,
-              curRaion.name,
+              getIntelChannelRegion(curRaion),
+              curRaion.oblast === 'Россия' ? '' : curRaion.name,
               pendingEv ?? 'tracking',
               forceImmediate,
             );
@@ -3837,9 +4010,13 @@ export function TacticalMap({
             // Single flyby or aircraft return-to-base landing completes cleanly
             statsDirty = true;
           } else {
-            const finalPt = flt.manualSteering
-              ? { lat: flt.lat, lng: flt.lng }
-              : flt.waypoints[flt.waypoints.length - 1];
+            const rangeExhausted = Boolean(
+              spec.maxRangeKm && (flt.lifetimeFlownKm ?? flt.coveredKm) >= spec.maxRangeKm,
+            );
+            const finalPt =
+              flt.manualSteering || rangeExhausted
+                ? { lat: flt.lat, lng: flt.lng }
+                : flt.waypoints[flt.waypoints.length - 1];
             const power = resolveStrikeBlastPower(flt.munitionId);
             triggerExplosionAt(
               finalPt.lat,
@@ -4007,6 +4184,8 @@ export function TacticalMap({
 
         for (const flt of flightsRef.current) {
           if (!isFlightDetected(flt)) continue;
+          // ППО не может сбивать цель, которая ещё находится на территории РФ
+          if (getTerritoryAt(flt.lat, flt.lng) === 'RU') continue;
           // Only Patriot systems can engage ballistic missiles (Iskander, Sapsan, Kinzhal, Kh-22)
           if (
             !flt.carrierAircraftId &&
@@ -4031,7 +4210,8 @@ export function TacticalMap({
             const activeChasers = interceptorsRef.current.filter(
               (ic) => ic.targetFlightId === flt.id && !ic.missed,
             ).length;
-            if (activeChasers < 2) {
+            const chaserLimit = pvo.airDefenseId === 'mg-pickup' ? 8 : 2;
+            if (activeChasers < chaserLimit) {
               bestDist = dKm;
               targetFlight = flt;
             }
@@ -4093,7 +4273,19 @@ export function TacticalMap({
             isSmallBullet,
             accentColor: spec.accentColor,
           });
-          pvoCooldownsRef.current[pvo.id] = spec.cooldownSec;
+          if (isSmallBullet) {
+            const curBurst = mgBurstRemainingRef.current[pvo.id] ?? 18;
+            const leftAfterShot = curBurst - 1;
+            if (leftAfterShot > 0 && pvo.ammo > 1) {
+              mgBurstRemainingRef.current[pvo.id] = leftAfterShot;
+              pvoCooldownsRef.current[pvo.id] = 0.075;
+            } else {
+              mgBurstRemainingRef.current[pvo.id] = 18;
+              pvoCooldownsRef.current[pvo.id] = spec.cooldownSec;
+            }
+          } else {
+            pvoCooldownsRef.current[pvo.id] = spec.cooldownSec;
+          }
           soundFx.playSamLaunch(spec.isGun, isSmallBullet);
           callbacksRef.current.onPvoFired(pvo.id, bearingDeg);
         }
@@ -4141,6 +4333,13 @@ export function TacticalMap({
             duration: 0.55,
             isSelfDestruct: true,
           });
+          continue;
+        }
+
+        if (getTerritoryAt(tgt.lat, tgt.lng) === 'RU') {
+          sam.missed = true;
+          sam.overshootAge = 0;
+          nextInterceptors.push(sam);
           continue;
         }
 
@@ -4198,17 +4397,21 @@ export function TacticalMap({
               detail: `${pvoSpec.shortName} · ${formatLocationLabel(tgt.lat, tgt.lng)}`,
             });
             const hitRaion = getRaionAt(tgt.lat, tgt.lng);
-            if (hitRaion && getTelegramChannelByOblast(hitRaion.oblast)) {
-              const nearInfo = findNearestSettlementInfo(tgt.lat, tgt.lng);
-              callbacksRef.current.onTelegramIntel({
-                flightId: `int_${sam.id}`,
-                oblast: hitRaion.oblast,
-                raionName: hitRaion.name,
-                munitionId: tgt.munitionId,
-                nearCity: nearInfo.distKm <= 45 ? nearInfo.fullLabel : undefined,
-                altitudeMode: getFlightAltitudeMode(tgt),
-                eventKind: 'intercepted',
-              });
+            if (hitRaion) {
+              const regionKey = getIntelChannelRegion(hitRaion);
+              const chMeta = getTelegramChannelByOblast(regionKey);
+              if (chMeta) {
+                const nearInfo = findNearestSettlementInfo(tgt.lat, tgt.lng, chMeta.country);
+                callbacksRef.current.onTelegramIntel({
+                  flightId: `int_${sam.id}`,
+                  oblast: regionKey,
+                  raionName: hitRaion.oblast === 'Россия' ? undefined : hitRaion.name,
+                  munitionId: tgt.munitionId,
+                  nearCity: nearInfo.distKm <= 45 ? nearInfo.fullLabel : undefined,
+                  altitudeMode: getFlightAltitudeMode(tgt),
+                  eventKind: 'intercepted',
+                });
+              }
             }
             soundFx.playAirIntercept(
               tgtSpec.profile === 'prop-drone' || tgtSpec.profile === 'jet-drone',
@@ -4385,12 +4588,20 @@ export function TacticalMap({
             ) {
               continue;
             }
-            const cur = nextOblastInfo.get(meta.oblast);
+            const channelKey = getIntelChannelRegion(meta);
+            const cur = nextOblastInfo.get(channelKey);
             if (!cur) {
-              nextOblastInfo.set(meta.oblast, { level, raions: [meta.name] });
+              nextOblastInfo.set(channelKey, {
+                level,
+                raions: meta.oblast === 'Россия' ? [] : [meta.name],
+              });
             } else {
               if (level === 'missile') cur.level = 'missile';
-              if (cur.raions.length < 4 && !cur.raions.includes(meta.name)) {
+              if (
+                meta.oblast !== 'Россия' &&
+                cur.raions.length < 4 &&
+                !cur.raions.includes(meta.name)
+              ) {
                 cur.raions.push(meta.name);
               }
             }
@@ -4505,6 +4716,25 @@ export function TacticalMap({
 
       if (statsDirty) {
         emitMapStats(droneCount, missileCount);
+      }
+
+      if (shouldUpdateAlerts && selectedFlightRef.current) {
+        const selFlt = flightsRef.current.find((f) => f.id === selectedFlightRef.current);
+        if (selFlt) {
+          const selSpec = MUNITION_BY_ID[selFlt.munitionId];
+          const remKm = selSpec.maxRangeKm
+            ? Math.max(0, Math.round(selSpec.maxRangeKm - (selFlt.lifetimeFlownKm ?? selFlt.coveredKm)))
+            : Math.max(0, Math.round(selFlt.totalDistanceKm - selFlt.coveredKm));
+          callbacksRef.current.onSelectFlight({
+            id: selFlt.id,
+            munitionId: selFlt.munitionId,
+            carrierAircraftId: selFlt.carrierAircraftId,
+            isAiStrike: selFlt.isAiStrike,
+            lowAltitude: selFlt.lowAltitude,
+            altitudeMode: getFlightAltitudeMode(selFlt),
+            remainingKm: remKm,
+          });
+        }
       }
 
       // F. Update continuous in-flight sounds for airborne drones, missiles & ППО interceptors
@@ -5166,6 +5396,20 @@ export function TacticalMap({
             const mWps = airfieldMissileWaypointsRef.current;
             const fullMissilePts: RoutePoint[] = [launchPt, ...mWps];
             const totalMissileKm = computeRouteLengthKm(fullMissilePts);
+            const missileMaxKm = missileSpec.kabMaxRangeKm ?? missileSpec.maxRangeKm;
+
+            if (missileMaxKm) {
+              const rangePx = getPixelRadiusKm(map, launchPt.lat, launchPt.lng, missileMaxKm);
+              ctx.strokeStyle = 'rgba(96, 165, 250, 0.55)';
+              ctx.fillStyle = 'rgba(96, 165, 250, 0.04)';
+              ctx.lineWidth = 1.4;
+              ctx.setLineDash([6, 5]);
+              ctx.beginPath();
+              ctx.arc(launchCanvasPt.x, launchCanvasPt.y, rangePx, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+              ctx.setLineDash([]);
+            }
 
             if (fullMissilePts.length > 1) {
               ctx.strokeStyle = missileSpec.accentColor;
@@ -5242,7 +5486,8 @@ export function TacticalMap({
                 targetLng,
               );
               const mDistKm = totalMissileKm + segKm;
-              const canFire = pathCheck.allowed && segKm >= 6;
+              const withinMissileLimit = !missileMaxKm || mDistKm <= missileMaxKm;
+              const canFire = pathCheck.allowed && segKm >= 6 && withinMissileLimit;
 
               ctx.strokeStyle = canFire ? missileSpec.accentColor : '#EF4444';
               ctx.lineWidth = hasLockedEntity ? 2.1 : 1.85;
@@ -5272,7 +5517,9 @@ export function TacticalMap({
 
               const labelText = !pathCheck.allowed
                 ? 'Вне зоны UA / RU'
-                : lockedBuilding
+                : !withinMissileLimit
+                  ? `Вне радиуса ${missileSpec.shortName}: ${Math.round(mDistKm)} / ${missileMaxKm} км`
+                  : lockedBuilding
                   ? (() => {
                       const bSpec = BUILDING_BY_ID[lockedBuilding.buildingId];
                       const afterHp = Math.max(
@@ -5313,7 +5560,7 @@ export function TacticalMap({
       // 3.8. Render selected airborne flight route-change preview (1-click redirect or multi-waypoint)
       if (selectedFlightRef.current && !pendingRef.current) {
         const selFlt = flightsRef.current.find((f) => f.id === selectedFlightRef.current);
-        if (selFlt && isFlightVisible(selFlt)) {
+        if (selFlt && isFlightVisible(selFlt) && !isReadOnlyAiTarget(selFlt, gameModeRef.current)) {
           const spec = MUNITION_BY_ID[selFlt.munitionId];
           const curFlightPt = map.latLngToContainerPoint([selFlt.lat, selFlt.lng]);
 
@@ -5481,7 +5728,8 @@ export function TacticalMap({
         const spec = MUNITION_BY_ID[flt.munitionId];
         const isSelectedFlt = selectedFlightRef.current === flt.id;
         const hideSelectedBlueLines =
-          isSelectedFlt && isManuallySteerableFlight(flt);
+          isSelectedFlt &&
+          (isManuallySteerableFlight(flt) || isReadOnlyAiTarget(flt, gameModeRef.current));
         const curPt = map.latLngToContainerPoint([flt.lat, flt.lng]);
         const finalGeo = flt.waypoints[flt.waypoints.length - 1];
         const endPt = map.latLngToContainerPoint([finalGeo.lat, finalGeo.lng]);
@@ -5680,13 +5928,20 @@ export function TacticalMap({
           reloadingProgress: reloadProgress,
           ammo: l.ammo,
           maxAmmo: l.maxAmmo,
+          isNavalShip: l.isNavalShip,
           timeSec,
         });
 
         if (isSel || isHov) {
           ctx.save();
           ctx.font = '600 11px "Plus Jakarta Sans", sans-serif';
-          const tag = l.isAi ? `ПУ ИИ · ${spec.shortName}` : `ПУ · ${spec.shortName}`;
+          const tag = l.isNavalShip
+            ? l.isAi
+              ? 'Корабль ИИ · Калибр'
+              : 'Корабль ВМФ · Калибр'
+            : l.isAi
+              ? `ПУ ИИ · ${spec.shortName}`
+              : `ПУ · ${spec.shortName}`;
           const tw = ctx.measureText(tag).width;
           ctx.fillStyle = 'rgba(7, 13, 23, 0.88)';
           ctx.strokeStyle = isSel ? spec.accentColor : 'rgba(148, 163, 184, 0.4)';
@@ -5717,6 +5972,7 @@ export function TacticalMap({
           missileShortName: missileSpec.shortName,
           salvoCount: salvo,
           accentColor: aircraftSpec.accentColor,
+          faction: af.faction,
           selected: isSel,
           hovered: isHov,
           timeSec,
@@ -5725,10 +5981,18 @@ export function TacticalMap({
         if (isSel || isHov) {
           ctx.save();
           ctx.font = '600 11px "Plus Jakarta Sans", sans-serif';
-          const tag = af.isAi ? `База РФ · ${af.name}` : `Аэродром · ${af.name}`;
+          const tag = af.isAi
+            ? `База РФ · ${af.name}`
+            : af.faction === 'UA'
+              ? `Аэродром ВСУ · ${af.name}`
+              : `Аэродром · ${af.name}`;
           const tw = ctx.measureText(tag).width;
           ctx.fillStyle = 'rgba(7, 13, 23, 0.9)';
-          ctx.strokeStyle = isSel ? aircraftSpec.accentColor : 'rgba(249, 115, 22, 0.55)';
+          ctx.strokeStyle = isSel
+            ? aircraftSpec.accentColor
+            : af.faction === 'UA'
+              ? 'rgba(56, 189, 248, 0.55)'
+              : 'rgba(249, 115, 22, 0.55)';
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.roundRect(pt.x - tw / 2 - 7, pt.y - 44, tw + 14, 19, 4);
@@ -5757,7 +6021,10 @@ export function TacticalMap({
         if (
           (isSelFlt || isHovFlt) &&
           !isFollowFlt &&
-          !(isSelFlt && isManuallySteerableFlight(flt))
+          !(
+            isSelFlt &&
+            (isManuallySteerableFlight(flt) || isReadOnlyAiTarget(flt, gameModeRef.current))
+          )
         ) {
           ctx.save();
           ctx.strokeStyle = isSelFlt ? '#38BDF8' : 'rgba(56, 189, 248, 0.65)';
@@ -5857,6 +6124,17 @@ export function TacticalMap({
               ? 'Только подконтрольная Украина'
               : 'Только РФ и оккуп. территории'
             : `Установить ПУ (${spec.faction === 'UA' ? 'Украина' : territory === 'RU' ? 'Россия' : 'Оккуп. территория'}) · ${spec.maxAmmo} пусков`;
+        } else if (pendingRef.current.kind === 'ship') {
+          valid = isBlackOrAzovSeaPoint(cursorRef.current.lat, cursorRef.current.lng);
+          drawLauncher(ctx, cursorRef.current.x, cursorRef.current.y, MUNITION_BY_ID.kalibr, {
+            isPreview: true,
+            previewValid: valid,
+            isNavalShip: true,
+            timeSec,
+          });
+          tip = valid
+            ? 'Поставить корабль ВМФ РФ (Чёрное / Азовское море) · 8 КР «Калибр»'
+            : 'Только Чёрное или Азовское море (вне берега и других стран)';
         } else if (pendingRef.current.kind === 'airfield') {
           const placeCheck = isFactionPlacementAllowed(
             'RU',
@@ -5865,12 +6143,13 @@ export function TacticalMap({
           );
           valid = placeCheck.allowed;
           drawAirfield(ctx, cursorRef.current.x, cursorRef.current.y, {
-            name: 'База',
+            name: 'База ВКС',
             aircraftId: 'mig31k',
             aircraftShortName: 'МиГ-31К',
             missileShortName: 'Кинжал',
             salvoCount: 1,
             accentColor: '#F97316',
+            faction: 'RU',
             isPreview: true,
             previewValid: valid,
             timeSec,
@@ -5878,6 +6157,28 @@ export function TacticalMap({
           tip = valid
             ? `Поставить аэродром ВКС РФ (${territory === 'RU' ? 'Россия' : 'Оккуп. территория'})`
             : 'Только РФ и оккуп. территории';
+        } else if (pendingRef.current.kind === 'airfield-ua') {
+          const placeCheck = isFactionPlacementAllowed(
+            'UA',
+            cursorRef.current.lat,
+            cursorRef.current.lng,
+          );
+          valid = placeCheck.allowed;
+          drawAirfield(ctx, cursorRef.current.x, cursorRef.current.y, {
+            name: 'Аэр. ВСУ',
+            aircraftId: 'f16am',
+            aircraftShortName: 'F-16AM',
+            missileShortName: 'Storm Shadow',
+            salvoCount: 2,
+            accentColor: '#38BDF8',
+            faction: 'UA',
+            isPreview: true,
+            previewValid: valid,
+            timeSec,
+          });
+          tip = valid
+            ? 'Поставить аэродром ВСУ (подконтрольная Украина)'
+            : 'Только подконтрольная территория Украины';
         } else if (pendingRef.current.kind === 'pvo') {
           const spec = AIR_DEFENSE_BY_ID[pendingRef.current.id];
           const rangePx = getPixelRadiusKm(
@@ -6062,40 +6363,48 @@ export function TacticalMap({
       />
 
       {/* Map Style Switcher & Navigation Controls */}
-      <div className="absolute bottom-4 right-4 z-20 flex items-end gap-2">
-        <div
-          className="flex items-center gap-0.5 rounded border border-slate-800 bg-[#0A111C]/95 p-0.5"
-          role="group"
-          aria-label="Слой карты"
-        >
-          <Globe className="h-3.5 w-3.5 text-slate-400 mx-1.5 shrink-0" />
-          {MAP_STYLES.map((st) => (
-            <button
-              key={st.id}
-              type="button"
-              onClick={() => {
-                soundFx.playUiClick('tab');
-                onChangeMapStyle(st.id);
-              }}
-              title={st.title}
-              className={`px-2 py-1 text-[11px] font-medium rounded-xs transition-colors whitespace-nowrap cursor-pointer ${
-                mapStyle === st.id
-                  ? 'bg-sky-500/20 text-sky-200 border border-sky-500/50'
-                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100 border border-transparent'
-              }`}
-            >
-              {st.label}
-            </button>
-          ))}
-        </div>
+      <div
+        className={`absolute z-20 flex items-end gap-2 ${
+          isMobile ? 'top-14 right-2.5' : 'bottom-4 right-4'
+        }`}
+      >
+        {!isMobile && (
+          <div
+            className="flex items-center gap-0.5 rounded border border-slate-800 bg-[#0A111C]/95 p-0.5"
+            role="group"
+            aria-label="Слой карты"
+          >
+            <Globe className="h-3.5 w-3.5 text-slate-400 mx-1.5 shrink-0" />
+            {MAP_STYLES.map((st) => (
+              <button
+                key={st.id}
+                type="button"
+                onClick={() => {
+                  soundFx.playUiClick('tab');
+                  onChangeMapStyle(st.id);
+                }}
+                title={st.title}
+                className={`px-2 py-1 text-[11px] font-medium rounded-xs transition-colors whitespace-nowrap cursor-pointer ${
+                  mapStyle === st.id
+                    ? 'bg-sky-500/20 text-sky-200 border border-sky-500/50'
+                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100 border border-transparent'
+                }`}
+              >
+                {st.label}
+              </button>
+            ))}
+          </div>
+        )}
 
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-1.5">
           <button
             type="button"
             onClick={handleZoomIn}
             title="Приблизить"
             aria-label="Приблизить карту"
-            className="flex h-10 w-10 items-center justify-center rounded border border-slate-800 bg-[#0A111C]/95 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+            className={`flex items-center justify-center rounded border border-slate-800 bg-[#0A111C]/95 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer ${
+              isMobile ? 'h-11 w-11' : 'h-10 w-10'
+            }`}
           >
             <Plus className="h-4 w-4" />
           </button>
@@ -6104,7 +6413,9 @@ export function TacticalMap({
             onClick={handleZoomOut}
             title="Отдалить"
             aria-label="Отдалить карту"
-            className="flex h-10 w-10 items-center justify-center rounded border border-slate-800 bg-[#0A111C]/95 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+            className={`flex items-center justify-center rounded border border-slate-800 bg-[#0A111C]/95 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer ${
+              isMobile ? 'h-11 w-11' : 'h-10 w-10'
+            }`}
           >
             <Minus className="h-4 w-4" />
           </button>
@@ -6113,7 +6424,9 @@ export function TacticalMap({
             onClick={handleResetView}
             title="Центрировать на Украине и России"
             aria-label="Центрировать карту"
-            className="flex h-10 w-10 items-center justify-center rounded border border-slate-800 bg-[#0A111C]/95 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+            className={`flex items-center justify-center rounded border border-slate-800 bg-[#0A111C]/95 text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer ${
+              isMobile ? 'h-11 w-11' : 'h-10 w-10'
+            }`}
           >
             <LocateFixed className="h-4 w-4" />
           </button>
