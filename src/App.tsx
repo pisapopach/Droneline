@@ -9,7 +9,6 @@ import {
   Coins,
   Crosshair,
   Eye,
-  Flame,
   Layers,
   Map as MapIcon,
   Menu,
@@ -20,14 +19,13 @@ import {
   Plus,
   Radar,
   RefreshCw,
-  Rocket,
   RotateCcw,
   Route,
+  Save,
   ScrollText,
   Search,
   Shield,
   ShieldAlert,
-  ShieldCheck,
   SlidersHorizontal,
   Smartphone,
   Swords,
@@ -106,11 +104,21 @@ import {
   getTelegramChannelByOblast,
   type TelegramPost,
 } from './utils/telegramIntel';
+import {
+  clearSandboxSave,
+  computeSandboxFingerprint,
+  countSandboxUnits,
+  formatSavedAtLabel,
+  loadSandboxState,
+  saveSandboxState,
+  type SandboxSaveData,
+} from './utils/sandboxStorage';
 
 type GameMode = 'sandbox' | 'ai';
 type GameScreen = 'menu' | 'playing' | 'gameover';
-type CatalogFilter = 'all' | 'strike' | 'pvo' | 'infra' | 'settings';
+type CatalogFilter = 'all' | 'strike' | 'pvo' | 'infra' | 'units' | 'settings';
 type DrawerTab = 'stats' | 'log';
+type JournalFilter = 'all' | 'intercept' | 'impact' | 'miss' | 'launch';
 
 interface TacticalEventEntry extends TacticalEventPayload {
   id: string;
@@ -211,6 +219,13 @@ export default function App() {
   const [gameScreen, setGameScreen] = useState<GameScreen>('menu');
   const [menuStep, setMenuStep] = useState<'title' | 'modes'>('title');
   const [gameMode, setGameMode] = useState<GameMode>('sandbox');
+  const [savedSandbox, setSavedSandbox] = useState<SandboxSaveData | null>(() => loadSandboxState());
+  const [sandboxExitPromptOpen, setSandboxExitPromptOpen] = useState<boolean>(false);
+  const [restoreStatsTrigger, setRestoreStatsTrigger] = useState<{
+    seq: number;
+    stats: MapStats;
+  } | null>(null);
+  const lastSavedFingerprintRef = useRef<string | null>(null);
 
   const [catalogFilter, setCatalogFilter] = useState<CatalogFilter>('all');
   const [pendingPlacement, setPendingPlacement] = useState<PendingPlacement | null>(null);
@@ -250,6 +265,7 @@ export default function App() {
   const [eventLog, setEventLog] = useState<TacticalEventEntry[]>([]);
   const [eventDrawerOpen, setEventDrawerOpen] = useState<boolean>(false);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>('stats');
+  const [journalFilter, setJournalFilter] = useState<JournalFilter>('all');
   const [telegramOpen, setTelegramOpen] = useState<boolean>(false);
   const [phoneScreen, setPhoneScreen] = useState<'telegram' | 'home'>('telegram');
   const [telegramCountryFilter, setTelegramCountryFilter] = useState<'UA' | 'RU'>('UA');
@@ -503,6 +519,8 @@ export default function App() {
 
   const handleStartGame = (mode: GameMode) => {
     aiHadBuildingsRef.current = false;
+    lastSavedFingerprintRef.current = null;
+    setSandboxExitPromptOpen(false);
     setLaunchers([]);
     setAirDefenses([]);
     setPendingPlacement(null);
@@ -522,6 +540,7 @@ export default function App() {
     setRouteWaypoints([]);
     setRouteLaunchCount(1);
     setEventLog([]);
+    setJournalFilter('all');
     setTelegramOpen(false);
     setSelectedTelegramOblast(null);
     setTelegramSearch('');
@@ -568,6 +587,8 @@ export default function App() {
 
   const handleReturnToMenu = () => {
     aiHadBuildingsRef.current = false;
+    lastSavedFingerprintRef.current = null;
+    setSandboxExitPromptOpen(false);
     setLaunchers([]);
     setAirfields([]);
     setAirDefenses([]);
@@ -591,6 +612,7 @@ export default function App() {
     setPendingAiWaveOrders([]);
     setPendingAiSorties([]);
     setEventLog([]);
+    setJournalFilter('all');
     setTelegramOpen(false);
     setSelectedTelegramOblast(null);
     setTelegramSearch('');
@@ -603,15 +625,201 @@ export default function App() {
     setGameScreen('menu');
   };
 
+  const handleSaveCurrentSandbox = (options?: { silent?: boolean }): boolean => {
+    const cleanLaunchers = launchers.filter((l) => !l.isAi);
+    const cleanAirfields = airfields.filter((a) => !a.isAi);
+    const totalUnits = countSandboxUnits({
+      launchers: cleanLaunchers,
+      airfields: cleanAirfields,
+      airDefenses,
+      buildings,
+    });
+    if (totalUnits === 0) {
+      clearSandboxSave();
+      setSavedSandbox(null);
+      lastSavedFingerprintRef.current = null;
+      if (!options?.silent) {
+        showWarning('На карте нет объектов для сохранения');
+      }
+      return false;
+    }
+
+    const payload: SandboxSaveData = {
+      version: 1,
+      savedAt: Date.now(),
+      simTimeMinutes,
+      buildingScale,
+      mapStyle,
+      showFrontline,
+      showRaions,
+      showLabels,
+      launchers: cleanLaunchers,
+      airfields: cleanAirfields,
+      airDefenses,
+      buildings,
+      stats: {
+        totalLaunches: stats.totalLaunches,
+        explosions: stats.explosions,
+        intercepts: stats.intercepts,
+        misses: stats.misses,
+        destroyedByStrikes: stats.destroyedByStrikes,
+      },
+      eventLog: eventLog.slice(0, 40),
+    };
+    const savedOk = saveSandboxState(payload);
+    if (!savedOk) {
+      if (!options?.silent) {
+        showWarning('Не удалось сохранить расстановку в память браузера');
+      }
+      return false;
+    }
+    setSavedSandbox(payload);
+    lastSavedFingerprintRef.current = computeSandboxFingerprint({
+      launchers: cleanLaunchers,
+      airfields: cleanAirfields,
+      airDefenses,
+      buildings,
+      buildingScale,
+    });
+    if (!options?.silent) {
+      soundFx.playUiClick('confirm');
+      showWarning('Расстановка песочницы сохранена');
+    }
+    return true;
+  };
+
+  const handleRequestReturnToMenu = () => {
+    if (gameMode === 'sandbox' && gameScreen === 'playing') {
+      const unitCount = countSandboxUnits({
+        launchers,
+        airfields,
+        airDefenses,
+        buildings,
+      });
+      const currentFp = computeSandboxFingerprint({
+        launchers,
+        airfields,
+        airDefenses,
+        buildings,
+        buildingScale,
+      });
+      if (unitCount > 0 && currentFp !== lastSavedFingerprintRef.current) {
+        setSandboxExitPromptOpen(true);
+        return;
+      }
+    }
+    handleReturnToMenu();
+  };
+
+  const handleResumeSavedSandbox = () => {
+    const save = savedSandbox ?? loadSandboxState();
+    if (!save) {
+      handleStartGame('sandbox');
+      return;
+    }
+    aiHadBuildingsRef.current = false;
+    setSandboxExitPromptOpen(false);
+    setPendingPlacement(null);
+    setSelectedLauncherId(null);
+    setSelectedAirfieldId(null);
+    setSelectedFlight(null);
+    setMobileSteerDir(0);
+    setFollowCamActive(false);
+    setFlightAltitudeCommand(null);
+    setIsPlottingFlightRoute(false);
+    setFlightRouteWaypoints([]);
+    setAirfieldLaunchPoint(null);
+    setAirfieldMissileWaypoints([]);
+    setAirfieldModalStep(null);
+    setSu57DropPoint(null);
+    setIsPlottingRoute(false);
+    setRouteWaypoints([]);
+    setRouteLaunchCount(1);
+    setJournalFilter('all');
+    setTelegramOpen(false);
+    setSelectedTelegramOblast(null);
+    setTelegramSearch('');
+    setTelegramPosts([]);
+    setTelegramUnreadByOblast({});
+    setPendingAiWaveOrders([]);
+    setPendingAiSorties([]);
+    setClearSignal((n) => n + 1);
+
+    setGameMode('sandbox');
+    setLaunchers(save.launchers);
+    setAirfields(save.airfields);
+    setAirDefenses(save.airDefenses);
+    setBuildings(save.buildings);
+    setBuildingScale(save.buildingScale);
+    setSimTimeMinutes(save.simTimeMinutes);
+    setMapStyle(save.mapStyle);
+    setShowFrontline(save.showFrontline);
+    setShowRaions(save.showRaions);
+    setShowLabels(save.showLabels);
+    setEventLog(save.eventLog);
+
+    const restoredStats: MapStats = {
+      ...EMPTY_STATS,
+      ...save.stats,
+    };
+    setStats(restoredStats);
+    setRestoreStatsTrigger((prev) => ({
+      seq: (prev?.seq ?? 0) + 1,
+      stats: restoredStats,
+    }));
+    lastSavedFingerprintRef.current = computeSandboxFingerprint({
+      launchers: save.launchers,
+      airfields: save.airfields,
+      airDefenses: save.airDefenses,
+      buildings: save.buildings,
+      buildingScale: save.buildingScale,
+    });
+
+    const allUnits = [
+      ...save.launchers,
+      ...save.airfields,
+      ...save.airDefenses,
+      ...save.buildings,
+    ];
+    if (allUnits.length > 0) {
+      const avgLat = allUnits.reduce((sum, u) => sum + u.lat, 0) / allUnits.length;
+      const avgLng = allUnits.reduce((sum, u) => sum + u.lng, 0) / allUnits.length;
+      setFocusCoords({ lat: avgLat, lng: avgLng, zoom: allUnits.length === 1 ? 7 : 6 });
+    } else {
+      setFocusCoords({ lat: 49.4, lng: 34.8, zoom: 5 });
+    }
+
+    setCatalogFilter('all');
+    setSidebarOpen(true);
+    setGameScreen('playing');
+    soundFx.playUiClick('confirm');
+  };
+
+  const handleDeleteSavedSandbox = () => {
+    clearSandboxSave();
+    setSavedSandbox(null);
+    lastSavedFingerprintRef.current = null;
+    soundFx.playUiClick('back');
+  };
+
+  const handleCancelAirfieldSelection = useCallback(() => {
+    setAirfieldModalStep(null);
+    setAirfieldLaunchPoint(null);
+    setAirfieldMissileWaypoints([]);
+    setSelectedAirfieldId(null);
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (pendingPlacement) {
+        if (sandboxExitPromptOpen) {
+          setSandboxExitPromptOpen(false);
+        } else if (pendingPlacement) {
           setPendingPlacement(null);
         } else if (airfieldModalStep === 'missiles') {
           setAirfieldModalStep('aircraft');
         } else if (airfieldModalStep === 'aircraft') {
-          setAirfieldModalStep(null);
+          handleCancelAirfieldSelection();
         } else if (isPlottingFlightRoute) {
           setIsPlottingFlightRoute(false);
           setFlightRouteWaypoints([]);
@@ -662,6 +870,7 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    sandboxExitPromptOpen,
     pendingPlacement,
     airfieldModalStep,
     isPlottingFlightRoute,
@@ -677,6 +886,7 @@ export default function App() {
     selectedTelegramOblast,
     telegramOpen,
     toggleMute,
+    handleCancelAirfieldSelection,
   ]);
 
   const clearSelectionModes = () => {
@@ -1254,6 +1464,8 @@ export default function App() {
       handleStartGame('ai');
       return;
     }
+    lastSavedFingerprintRef.current = null;
+    setSandboxExitPromptOpen(false);
     setLaunchers([]);
     setAirfields([]);
     setAirDefenses([]);
@@ -1305,8 +1517,8 @@ export default function App() {
 
   const playerAirfields = airfields.filter((a) => !a.isAi);
   const playerLaunchers = launchers.filter((l) => !l.isAi);
-  const aiActiveLaunchersCount = launchers.filter((l) => l.isAi).length;
-  const aiAirfieldsCount = airfields.filter((a) => a.isAi).length;
+  const playerUnitsCount =
+    playerLaunchers.length + playerAirfields.length + airDefenses.length + buildings.length;
 
   const totalBuildingsMaxHp = buildings.reduce((sum, b) => sum + b.maxHp, 0);
   const totalBuildingsHp = buildings.reduce((sum, b) => sum + Math.max(0, b.hp), 0);
@@ -1504,37 +1716,103 @@ export default function App() {
 
             {/* Two Distinct Tactical Mode Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 p-6">
-              <button
-                type="button"
-                onClick={() => handleStartGame('sandbox')}
-                className="group flex flex-col items-start border border-[#354238] bg-[#1A211B] hover:bg-[#202922] hover:border-[#6CA69C] p-5 text-left transition-all hover:-translate-y-0.5 cursor-pointer"
-              >
-                <div className="w-full pb-4 mb-4 border-b border-[#2C362E] flex items-center justify-between gap-3">
-                  <svg width="46" height="32" viewBox="0 0 46 32" fill="none" aria-hidden="true">
-                    <path d="M3 26 H43" stroke="#4D5F53" strokeWidth="1.2" />
-                    <path d="M8 26 L18 14 L25 26" stroke="#6CA69C" strokeWidth="1.4" fill="none" />
-                    <path d="M18 14 Q29 4 40 12" stroke="#6CA69C" strokeWidth="1.3" strokeDasharray="3 2" />
-                    <circle cx="40" cy="12" r="2.2" fill="#ECE8DD" />
-                  </svg>
-                  <span className="text-xs font-semibold text-[#6CA69C] group-hover:underline whitespace-nowrap shrink-0">
-                    Открыть карту →
-                  </span>
+              {savedSandbox ? (
+                <div className="flex flex-col items-start border border-[#6CA69C]/65 bg-[#1A211B] p-5 text-left">
+                  <div className="w-full pb-4 mb-4 border-b border-[#2C362E] flex items-center justify-between gap-3">
+                    <svg width="46" height="32" viewBox="0 0 46 32" fill="none" aria-hidden="true">
+                      <path d="M3 26 H43" stroke="#4D5F53" strokeWidth="1.2" />
+                      <path d="M8 26 L18 14 L25 26" stroke="#6CA69C" strokeWidth="1.4" fill="none" />
+                      <path d="M18 14 Q29 4 40 12" stroke="#6CA69C" strokeWidth="1.3" strokeDasharray="3 2" />
+                      <circle cx="40" cy="12" r="2.2" fill="#ECE8DD" />
+                    </svg>
+                    <span className="text-[11px] font-mono-tabular text-[#6CA69C] whitespace-nowrap shrink-0">
+                      Сохр. {formatSavedAtLabel(savedSandbox.savedAt)}
+                    </span>
+                  </div>
+
+                  <h2 className="font-display text-2xl font-bold uppercase tracking-wide text-[#F4EFE4]">
+                    Песочница
+                  </h2>
+
+                  <p className="mt-1.5 text-xs leading-relaxed text-[#A5B09F]">
+                    Найдена сохранённая расстановка на карте. Можно продолжить с неё или начать заново.
+                  </p>
+
+                  <div className="mt-3 w-full grid grid-cols-2 gap-x-3 gap-y-1 border border-[#2C362E] bg-[#131914] px-3 py-2 text-[11px] font-mono-tabular text-[#C9D6CE]">
+                    <span>
+                      ПУ: <strong className="text-[#F4EFE4]">{savedSandbox.launchers.length}</strong>
+                    </span>
+                    <span>
+                      ППО: <strong className="text-[#6CA69C]">{savedSandbox.airDefenses.length}</strong>
+                    </span>
+                    <span>
+                      Объекты: <strong className="text-[#F4EFE4]">{savedSandbox.buildings.length}</strong>
+                    </span>
+                    <span>
+                      Аэродромы: <strong className="text-[#F4EFE4]">{savedSandbox.airfields.length}</strong>
+                    </span>
+                  </div>
+
+                  <div className="mt-4 w-full flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={handleResumeSavedSandbox}
+                      className="w-full flex items-center justify-center gap-1.5 bg-[#6CA69C] hover:bg-[#7DB8AE] text-[#0E1310] font-bold text-xs px-3 py-2.5 transition-colors cursor-pointer"
+                    >
+                      <span>Продолжить сохранение →</span>
+                    </button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleStartGame('sandbox')}
+                        className="flex items-center justify-center border border-[#354238] bg-[#141A15] hover:border-[#6CA69C] text-[#DCE6DF] text-xs font-semibold px-2.5 py-2 transition-colors cursor-pointer"
+                      >
+                        Новая карта
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDeleteSavedSandbox}
+                        className="flex items-center justify-center gap-1 border border-[#3E2C2A] bg-[#1A1515] hover:border-red-500/70 text-rose-300 text-xs font-semibold px-2.5 py-2 transition-colors cursor-pointer"
+                      >
+                        <Trash2 className="h-3 w-3 shrink-0" />
+                        <span>Удалить</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleStartGame('sandbox')}
+                  className="group flex flex-col items-start border border-[#354238] bg-[#1A211B] hover:bg-[#202922] hover:border-[#6CA69C] p-5 text-left transition-all hover:-translate-y-0.5 cursor-pointer"
+                >
+                  <div className="w-full pb-4 mb-4 border-b border-[#2C362E] flex items-center justify-between gap-3">
+                    <svg width="46" height="32" viewBox="0 0 46 32" fill="none" aria-hidden="true">
+                      <path d="M3 26 H43" stroke="#4D5F53" strokeWidth="1.2" />
+                      <path d="M8 26 L18 14 L25 26" stroke="#6CA69C" strokeWidth="1.4" fill="none" />
+                      <path d="M18 14 Q29 4 40 12" stroke="#6CA69C" strokeWidth="1.3" strokeDasharray="3 2" />
+                      <circle cx="40" cy="12" r="2.2" fill="#ECE8DD" />
+                    </svg>
+                    <span className="text-xs font-semibold text-[#6CA69C] group-hover:underline whitespace-nowrap shrink-0">
+                      Открыть карту →
+                    </span>
+                  </div>
 
-                <h2 className="font-display text-2xl font-bold uppercase tracking-wide text-[#F4EFE4]">
-                  Песочница
-                </h2>
+                  <h2 className="font-display text-2xl font-bold uppercase tracking-wide text-[#F4EFE4]">
+                    Песочница
+                  </h2>
 
-                <p className="mt-2 text-xs leading-relaxed text-[#A5B09F]">
-                  Свободное размещение любых пусковых установок, аэродромов, систем ППО, радаров и объектов без ограничений по ресурсам.
-                </p>
+                  <p className="mt-2 text-xs leading-relaxed text-[#A5B09F]">
+                    Свободное размещение любых пусковых установок, аэродромов, систем ППО, радаров и объектов без ограничений по ресурсам.
+                  </p>
 
-                <div className="mt-5 pt-3 border-t border-[#2C362E] w-full flex items-center gap-2 text-[11px] font-mono-tabular text-[#8EA39A]">
-                  <span>Все виды техники</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="text-[#6CA69C]">Без лимита $</span>
-                </div>
-              </button>
+                  <div className="mt-5 pt-3 border-t border-[#2C362E] w-full flex items-center gap-2 text-[11px] font-mono-tabular text-[#8EA39A]">
+                    <span>Все виды техники</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="text-[#6CA69C]">Без лимита $</span>
+                  </div>
+                </button>
+              )}
 
               <button
                 type="button"
@@ -1574,6 +1852,93 @@ export default function App() {
       </div>
     );
   }
+
+  const sandboxExitModal = sandboxExitPromptOpen ? (
+    <div
+      onClick={() => setSandboxExitPromptOpen(false)}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 backdrop-blur-xs p-4"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sandbox-exit-modal-title"
+        className="w-full max-w-md rounded border border-slate-700 bg-[#0A111C] shadow-2xl overflow-hidden text-slate-100"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-slate-800 bg-[#070B12] px-4 py-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Save className="h-4 w-4 text-emerald-400 shrink-0" />
+            <h2
+              id="sandbox-exit-modal-title"
+              className="text-sm font-bold text-slate-100 truncate"
+            >
+              Сохранить расстановку?
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSandboxExitPromptOpen(false)}
+            aria-label="Отмена"
+            className="flex h-7 w-7 items-center justify-center rounded border border-slate-800 bg-[#0E1726] text-slate-400 hover:text-white cursor-pointer"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-3.5">
+          <p className="text-xs leading-relaxed text-slate-300">
+            На карте песочницы размещены объекты и техника. Сохранить текущую расстановку, чтобы продолжить позже?
+          </p>
+
+          <div className="grid grid-cols-2 gap-2 rounded border border-slate-800 bg-[#070B12] px-3 py-2.5 text-xs font-mono-tabular text-slate-300">
+            <span>
+              ПУ: <strong className="text-slate-100">{playerLaunchers.length}</strong>
+            </span>
+            <span>
+              ППО: <strong className="text-emerald-300">{airDefenses.length}</strong>
+            </span>
+            <span>
+              Объекты: <strong className="text-slate-100">{buildings.length}</strong>
+            </span>
+            <span>
+              Аэродромы: <strong className="text-slate-100">{playerAirfields.length}</strong>
+            </span>
+          </div>
+
+          <div className="flex flex-col gap-2 pt-0.5">
+            <button
+              type="button"
+              onClick={() => {
+                handleSaveCurrentSandbox({ silent: true });
+                handleReturnToMenu();
+              }}
+              className="w-full flex items-center justify-center gap-2 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 px-4 transition-colors cursor-pointer"
+            >
+              <Save className="h-4 w-4 shrink-0" />
+              <span>Сохранить и выйти</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                soundFx.playUiClick('back');
+                handleReturnToMenu();
+              }}
+              className="w-full flex items-center justify-center rounded border border-red-500/45 bg-red-950/30 hover:bg-red-950/55 hover:border-red-400 text-rose-200 font-semibold text-sm py-2.5 px-4 transition-colors cursor-pointer"
+            >
+              Выйти без сохранения
+            </button>
+            <button
+              type="button"
+              onClick={() => setSandboxExitPromptOpen(false)}
+              className="w-full flex items-center justify-center rounded border border-slate-700 bg-[#0E1726] hover:border-slate-500 text-slate-200 font-medium text-sm py-2 px-4 transition-colors cursor-pointer"
+            >
+              Отмена
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   if (isMobile) {
     return (
@@ -1618,6 +1983,7 @@ export default function App() {
             alertRadiusKm={alertRadiusKm}
             alertHoldoverSec={alertHoldoverSec}
             clearSignal={clearSignal}
+            restoreStatsTrigger={restoreStatsTrigger}
             focusCoords={focusCoords}
             onChangeMapStyle={setMapStyle}
             onPlaceStrikeLauncher={handlePlaceStrikeLauncher}
@@ -1680,7 +2046,8 @@ export default function App() {
             onToggleLabels={() => setShowLabels((v) => !v)}
             mapStyle={mapStyle}
             onChangeMapStyle={setMapStyle}
-            onReturnToMenu={handleReturnToMenu}
+            onReturnToMenu={handleRequestReturnToMenu}
+            onSaveSandbox={() => handleSaveCurrentSandbox()}
             onClearAll={handleClearAll}
             onStartAiAgain={() => handleStartGame('ai')}
             stats={stats}
@@ -1692,8 +2059,6 @@ export default function App() {
             playerAirfields={playerAirfields}
             airDefenses={airDefenses}
             buildings={buildings}
-            aiActiveLaunchersCount={aiActiveLaunchersCount}
-            aiAirfieldsCount={aiAirfieldsCount}
             pendingPlacement={pendingPlacement}
             onCancelPending={() => setPendingPlacement(null)}
             onSelectStrikeCatalog={handleSelectStrikeCatalog}
@@ -1714,6 +2079,7 @@ export default function App() {
             airfieldMissileWaypoints={airfieldMissileWaypoints}
             airfieldModalStep={airfieldModalStep}
             onSetAirfieldModalStep={setAirfieldModalStep}
+            onCancelAirfieldSelection={handleCancelAirfieldSelection}
             onSelectAirfield={handleSelectAirfield}
             onChangeAirfieldAircraft={handleChangeAirfieldAircraft}
             onChangeAirfieldSalvo={handleChangeAirfieldSalvo}
@@ -1812,6 +2178,7 @@ export default function App() {
             onClearEventLog={() => setEventLog([])}
             warning={warning}
           />
+          {sandboxExitModal}
         </main>
       </div>
     );
@@ -1838,7 +2205,7 @@ export default function App() {
             type="button"
             onClick={() => {
               soundFx.playUiClick('back');
-              handleReturnToMenu();
+              handleRequestReturnToMenu();
             }}
             className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 hover:text-white px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
@@ -2012,6 +2379,23 @@ export default function App() {
             <span className="hidden xl:inline">{muted ? 'Без звука' : 'Звук'}</span>
           </button>
 
+          {gameMode === 'sandbox' && (
+            <button
+              type="button"
+              onClick={() => handleSaveCurrentSandbox()}
+              disabled={playerUnitsCount === 0}
+              title="Сохранить расстановку песочницы"
+              className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                playerUnitsCount === 0
+                  ? 'border-slate-800/60 bg-[#0A111C] text-slate-600 cursor-not-allowed'
+                  : 'border-emerald-600/45 bg-emerald-950/25 hover:border-emerald-400 text-emerald-200 cursor-pointer'
+              }`}
+            >
+              <Save className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Сохранить</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => {
@@ -2091,25 +2475,27 @@ export default function App() {
             sidebarOpen ? 'translate-x-0 w-76 sm:w-80' : '-translate-x-full w-0 border-r-0'
           } absolute md:relative inset-y-0 left-0 z-30 flex flex-col border-r border-slate-800 bg-[#0A111C] transition-all duration-200 overflow-hidden shrink-0`}
         >
-          {/* Category Filter Tabs (Flat segmented bar) */}
-          <div className="border-b border-slate-800 bg-[#080D16] shrink-0">
+          {/* Category Filter Tabs (Flat operational command strip) */}
+          <div className="border-b border-slate-800 bg-[#070B12] shrink-0">
             <div
-              className={`grid divide-x divide-slate-800 ${
-                gameMode === 'ai' ? 'grid-cols-3' : 'grid-cols-5'
+              className={`grid divide-x divide-slate-800/80 ${
+                gameMode === 'ai' ? 'grid-cols-4' : 'grid-cols-6'
               }`}
             >
               {(
                 gameMode === 'ai'
                   ? ([
-                      { id: 'pvo', label: 'ППО и РЛС' },
+                      { id: 'pvo', label: 'ППО' },
                       { id: 'infra', label: 'Объекты' },
+                      { id: 'units', label: `Карта (${playerUnitsCount})` },
                       { id: 'settings', label: 'Тревога' },
                     ] as const)
                   : ([
                       { id: 'all', label: 'Все' },
-                      { id: 'strike', label: 'Ударные' },
+                      { id: 'strike', label: 'Удар' },
                       { id: 'pvo', label: 'ППО' },
-                      { id: 'infra', label: 'Объекты' },
+                      { id: 'infra', label: 'Здания' },
+                      { id: 'units', label: `Карта (${playerUnitsCount})` },
                       { id: 'settings', label: 'Тревога' },
                     ] as const)
               ).map((tab) => (
@@ -2120,10 +2506,10 @@ export default function App() {
                     soundFx.playUiClick('tab');
                     setCatalogFilter(tab.id);
                   }}
-                  className={`py-2.5 px-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  className={`py-2.5 px-1 text-[10.5px] font-semibold tracking-tight transition-colors whitespace-nowrap cursor-pointer ${
                     catalogFilter === tab.id
-                      ? 'bg-[#121E32] text-white border-b-2 border-sky-400'
-                      : 'text-slate-400 hover:text-slate-200 hover:bg-[#0D1624]'
+                      ? 'bg-[#101A2B] text-white border-b-2 border-sky-400'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-[#0B121E]'
                   }`}
                 >
                   {tab.label}
@@ -2132,7 +2518,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="tac-scroll flex-1 overflow-y-auto p-3.5 space-y-5">
+          <div className="tac-scroll flex-1 overflow-y-auto p-3 space-y-4">
             {catalogFilter === 'settings' && (
               <section className="space-y-4">
                 <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800">
@@ -2355,41 +2741,43 @@ export default function App() {
 
             {/* Strike Munitions (Sandbox only) */}
             {gameMode === 'sandbox' && (catalogFilter === 'all' || catalogFilter === 'strike') && (
-              <section className="space-y-4">
-                {/* Russian Military Airfield Selector & Presets */}
-                <div className="border border-amber-500/40 rounded bg-[#080D16] overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      soundFx.playUiClick('toggle');
-                      setAirfieldMenuOpen((v) => !v);
-                    }}
-                    className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-[#0E1726] transition-colors cursor-pointer"
-                  >
-                    <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-amber-500/35 shrink-0 overflow-hidden">
-                      <AirfieldIcon className="w-14 h-10" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-semibold text-amber-100 truncate">
-                          Аэродром ВКС РФ
-                        </span>
-                        <span className="text-[11px] font-mono-tabular text-amber-300 whitespace-nowrap shrink-0">
-                          {airfieldMenuOpen ? 'Скрыть' : 'Открыть'}
-                        </span>
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-slate-400 truncate">
-                        Саваслейка, Энгельс, Шайковка · Носители КР
-                      </div>
-                    </div>
-                  </button>
+              <section className="space-y-3.5">
+                {/* Russian Military Airfield & Naval Platforms */}
+                <div className="space-y-1.5">
+                  <div className="flex items-baseline justify-between">
+                    <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                      Носители РФ · Авиация и флот
+                    </h2>
+                    <span className="text-[10.5px] font-mono-tabular text-amber-300">КР / КАБ</span>
+                  </div>
 
-                  {airfieldMenuOpen && (
-                    <div className="border-t border-slate-800 p-2.5 space-y-2 bg-[#070B12]">
-                      <div className="text-[11px] font-medium text-slate-400">
-                        Куда поставить аэродром:
+                  <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundFx.playUiClick('toggle');
+                        setAirfieldMenuOpen((v) => !v);
+                      }}
+                      className="w-full flex items-center gap-2.5 px-2.5 py-2 text-left hover:bg-[#0D1522] transition-colors cursor-pointer"
+                    >
+                      <AirfieldIcon className="w-12 h-8 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-semibold text-amber-100 truncate">
+                            Аэродромы ВКС РФ
+                          </span>
+                          <span className="text-[10.5px] font-mono-tabular text-amber-300 whitespace-nowrap shrink-0">
+                            {airfieldMenuOpen ? 'Скрыть' : `${RUSSIAN_AIRBASE_PRESETS.length} баз`}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
+                          Ту-95МС, Ту-160, МиГ-31К, Су-57 · Х-101 / Кинжал
+                        </div>
                       </div>
-                      <div className="border border-slate-800 rounded divide-y divide-slate-800/80">
+                    </button>
+
+                    {airfieldMenuOpen && (
+                      <div className="bg-[#06090F] divide-y divide-slate-800/70">
                         {RUSSIAN_AIRBASE_PRESETS.map((preset) => {
                           const isPlaced = airfields.some((a) => a.presetId === preset.id);
                           const aircraft = RUSSIAN_AIRCRAFT_BY_ID[preset.defaultAircraftId];
@@ -2399,10 +2787,8 @@ export default function App() {
                               key={preset.id}
                               type="button"
                               onClick={() => handleDeployPresetAirbase(preset)}
-                              className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors cursor-pointer ${
-                                isPlaced
-                                  ? 'bg-amber-500/12'
-                                  : 'bg-[#0A111C] hover:bg-[#0E1726]'
+                              className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors cursor-pointer ${
+                                isPlaced ? 'bg-amber-500/12' : 'hover:bg-[#0D1522]'
                               }`}
                             >
                               <div className="min-w-0 flex-1">
@@ -2411,14 +2797,14 @@ export default function App() {
                                     className="h-3 w-3 shrink-0"
                                     style={{ color: aircraft.accentColor }}
                                   />
-                                  <span className="text-xs font-semibold text-slate-100 truncate">
+                                  <span className="text-xs font-medium text-slate-100 truncate">
                                     {preset.name}
                                   </span>
                                   <span className="text-[10px] text-slate-500 truncate">
-                                    ({preset.region})
+                                    {preset.region}
                                   </span>
                                 </div>
-                                <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
+                                <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
                                   {preset.availableAircraftIds
                                     .map((id) => RUSSIAN_AIRCRAFT_BY_ID[id].shortName)
                                     .join(' / ')}{' '}
@@ -2430,71 +2816,63 @@ export default function App() {
                                   isPlaced ? 'text-amber-300' : 'text-sky-300'
                                 }`}
                               >
-                                {isPlaced ? 'Перейти' : 'Поставить'}
+                                {isPlaced ? 'Перейти' : 'На карту'}
                               </span>
                             </button>
                           );
                         })}
-                      </div>
 
-                      <button
-                        type="button"
-                        onClick={handleStartManualAirfieldPlacement}
-                        className={`w-full rounded border px-2.5 py-2 text-xs font-semibold transition-colors cursor-pointer ${
-                          pendingAirfield
-                            ? 'border-amber-400 bg-amber-500/18 text-amber-200'
-                            : 'border-slate-700 bg-[#0E1726] hover:border-amber-500/50 text-slate-200'
-                        }`}
-                      >
-                        {pendingAirfield
-                          ? 'Нажмите на карту РФ или оккуп. терр.…'
-                          : '+ Поставить свой аэродром'}
-                      </button>
-                    </div>
-                  )}
+                        <button
+                          type="button"
+                          onClick={handleStartManualAirfieldPlacement}
+                          className={`w-full px-3 py-2 text-left text-[11px] font-semibold transition-colors cursor-pointer ${
+                            pendingAirfield
+                              ? 'bg-amber-500/18 text-amber-200'
+                              : 'text-slate-300 hover:bg-[#0D1522] hover:text-amber-200'
+                          }`}
+                        >
+                          {pendingAirfield
+                            ? 'Кликните на карту РФ или оккуп. территорию…'
+                            : '+ Разместить произвольный аэродром РФ'}
+                        </button>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handleStartNavalShipPlacement}
+                      className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                        pendingShip ? 'bg-sky-500/16' : 'hover:bg-[#0D1522]'
+                      }`}
+                    >
+                      <ShipIcon className="w-12 h-8 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-semibold text-sky-100 truncate">
+                            Корабль ВМФ РФ
+                          </span>
+                          <span className="font-mono-tabular text-[10.5px] font-semibold text-amber-300 whitespace-nowrap shrink-0">
+                            {pendingShip ? 'В море…' : '8× Калибр'}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
+                          Чёрное и Азовское море · Морской ракетоносец
+                        </div>
+                      </div>
+                    </button>
+                  </div>
                 </div>
 
-                {/* Naval Vessel in Black/Azov Sea for Kalibr Launches */}
-                <button
-                  type="button"
-                  onClick={handleStartNavalShipPlacement}
-                  className={`w-full flex items-center gap-3 rounded border p-2.5 text-left transition-colors cursor-pointer ${
-                    pendingShip
-                      ? 'border-sky-400 bg-sky-500/16'
-                      : 'border-sky-500/40 bg-[#080D16] hover:bg-[#0E1726]'
-                  }`}
-                >
-                  <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-sky-500/35 shrink-0 overflow-hidden">
-                    <ShipIcon className="w-14 h-10" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-semibold text-sky-100 truncate">
-                        Корабль ВМФ РФ
-                      </span>
-                      <span
-                        className={`text-[11px] font-mono-tabular font-semibold whitespace-nowrap shrink-0 ${
-                          pendingShip ? 'text-sky-300' : 'text-amber-300'
-                        }`}
-                      >
-                        {pendingShip ? 'В море…' : '8× Калибр'}
-                      </span>
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-slate-400 truncate">
-                      КР «Калибр» · Ставится в Чёрном / Азовском море
-                    </div>
-                  </div>
-                </button>
-
-                <div>
-                  <div className="flex items-baseline justify-between mb-2">
-                    <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                {/* RU Ground Launchers */}
+                <div className="space-y-1.5">
+                  <div className="flex items-baseline justify-between">
+                    <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                       РФ и оккуп. · БПЛА и ракеты
                     </h2>
-                    <span className="text-[11px] font-mono-tabular text-amber-300">Ударные</span>
+                    <span className="text-[10.5px] font-mono-tabular text-rose-300">Наземные ПУ</span>
                   </div>
 
-                  <div className="border border-slate-800 rounded divide-y divide-slate-800/80 overflow-hidden">
+                  <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
                     {MUNITIONS.filter((m) => m.faction !== 'UA' && !m.airLaunchedOnly && !m.seaLaunchedOnly).map((item) => {
                       const isPending =
                         pendingPlacement?.kind === 'strike' && pendingPlacement.id === item.id;
@@ -2503,15 +2881,11 @@ export default function App() {
                           key={item.id}
                           type="button"
                           onClick={() => handleSelectStrikeCatalog(item.id)}
-                          className={`w-full flex items-center gap-2.5 p-2 text-left transition-colors cursor-pointer ${
-                            isPending
-                              ? 'bg-amber-500/14'
-                              : 'bg-[#080D16] hover:bg-[#0E1726]'
+                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                            isPending ? 'bg-amber-500/14' : 'hover:bg-[#0D1522]'
                           }`}
                         >
-                          <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-slate-800 shrink-0 overflow-hidden">
-                            <MunitionIcon id={item.id} className="w-14 h-10" />
-                          </div>
+                          <MunitionIcon id={item.id} className="w-12 h-8 shrink-0" />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-xs font-semibold text-slate-100 truncate">
@@ -2525,16 +2899,13 @@ export default function App() {
                                 {isPending ? 'На карту' : `-${item.damage} HP`}
                               </span>
                             </div>
-                            <div className="mt-0.5 text-[11px] text-slate-400 truncate">
-                              {item.category} · {item.realSpeedKmh} км/ч
+                            <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
+                              {item.category} · {item.realSpeedKmh} км/ч · Б/К {item.maxAmmo}
                               {item.maxRangeKm
                                 ? ` · ≤${item.maxRangeKm} км`
                                 : item.kabMaxRangeKm
                                   ? ` · КАБ ≤${item.kabMaxRangeKm} км`
                                   : ''}
-                            </div>
-                            <div className="mt-0.5 text-[10.5px] text-slate-500 truncate">
-                              {item.launcherName} · Б/К {item.maxAmmo}
                             </div>
                           </div>
                         </button>
@@ -2543,121 +2914,110 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="space-y-3">
+                {/* UA Airfields & Strike */}
+                <div className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="flex h-3 w-1.5 flex-col overflow-hidden rounded-xs shrink-0" aria-hidden="true">
+                    <div className="flex items-center gap-1.5">
+                      <span className="flex h-2.5 w-1.5 flex-col overflow-hidden rounded-xs shrink-0" aria-hidden="true">
                         <span className="h-1.5 w-full bg-blue-500" />
                         <span className="h-1.5 w-full bg-yellow-400" />
                       </span>
-                      <h2 className="text-xs font-semibold uppercase tracking-wider text-sky-200">
+                      <h2 className="text-[11px] font-semibold uppercase tracking-wider text-sky-300">
                         ВСУ · Авиация, БПЛА и ракеты
                       </h2>
                     </div>
-                    <span className="text-[11px] font-mono-tabular text-sky-400 whitespace-nowrap">
+                    <span className="text-[10.5px] font-mono-tabular text-sky-400 whitespace-nowrap">
                       Территория UA
                     </span>
                   </div>
 
-                  {/* Ukrainian Military Airfield Selector & Presets */}
-                  <div className="border border-sky-500/40 rounded bg-[#080D16] overflow-hidden">
+                  <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
                     <button
                       type="button"
                       onClick={() => {
                         soundFx.playUiClick('toggle');
                         setUaAirfieldMenuOpen((v) => !v);
                       }}
-                      className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-[#0E1726] transition-colors cursor-pointer"
+                      className="w-full flex items-center gap-2.5 px-2.5 py-2 text-left hover:bg-[#0D1522] transition-colors cursor-pointer"
                     >
-                      <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-sky-500/35 shrink-0 overflow-hidden">
-                        <AirfieldIcon className="w-14 h-10" />
-                      </div>
+                      <AirfieldIcon className="w-12 h-8 shrink-0" />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-sm font-semibold text-sky-100 truncate">
-                            Аэродром ВСУ
+                          <span className="text-xs font-semibold text-sky-100 truncate">
+                            Аэродромы ВСУ
                           </span>
-                          <span className="text-[11px] font-mono-tabular text-sky-300 whitespace-nowrap shrink-0">
-                            {uaAirfieldMenuOpen ? 'Скрыть' : 'Открыть'}
+                          <span className="text-[10.5px] font-mono-tabular text-sky-300 whitespace-nowrap shrink-0">
+                            {uaAirfieldMenuOpen ? 'Скрыть' : `${UKRAINIAN_AIRBASE_PRESETS.length} баз`}
                           </span>
                         </div>
-                        <div className="mt-0.5 text-[11px] text-slate-400 truncate">
+                        <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
                           Су-24М, F-16AM, МиГ-29 · Storm Shadow / AASM
                         </div>
                       </div>
                     </button>
 
                     {uaAirfieldMenuOpen && (
-                      <div className="border-t border-slate-800 p-2.5 space-y-2 bg-[#070B12]">
-                        <div className="text-[11px] font-medium text-slate-400">
-                          Куда поставить аэродром ВСУ:
-                        </div>
-                        <div className="border border-slate-800 rounded divide-y divide-slate-800/80">
-                          {UKRAINIAN_AIRBASE_PRESETS.map((preset) => {
-                            const isPlaced = airfields.some((a) => a.presetId === preset.id);
-                            const aircraft = RUSSIAN_AIRCRAFT_BY_ID[preset.defaultAircraftId];
-                            const missile = MUNITION_BY_ID[aircraft.missileId];
-                            return (
-                              <button
-                                key={preset.id}
-                                type="button"
-                                onClick={() => handleDeployPresetAirbase(preset)}
-                                className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors cursor-pointer ${
-                                  isPlaced
-                                    ? 'bg-sky-500/14'
-                                    : 'bg-[#0A111C] hover:bg-[#0E1726]'
+                      <div className="bg-[#06090F] divide-y divide-slate-800/70">
+                        {UKRAINIAN_AIRBASE_PRESETS.map((preset) => {
+                          const isPlaced = airfields.some((a) => a.presetId === preset.id);
+                          const aircraft = RUSSIAN_AIRCRAFT_BY_ID[preset.defaultAircraftId];
+                          const missile = MUNITION_BY_ID[aircraft.missileId];
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              onClick={() => handleDeployPresetAirbase(preset)}
+                              className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors cursor-pointer ${
+                                isPlaced ? 'bg-sky-500/14' : 'hover:bg-[#0D1522]'
+                              }`}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <Plane
+                                    className="h-3 w-3 shrink-0"
+                                    style={{ color: aircraft.accentColor }}
+                                  />
+                                  <span className="text-xs font-medium text-slate-100 truncate">
+                                    {preset.name}
+                                  </span>
+                                  <span className="text-[10px] text-slate-500 truncate">
+                                    {preset.region}
+                                  </span>
+                                </div>
+                                <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
+                                  {preset.availableAircraftIds
+                                    .map((id) => RUSSIAN_AIRCRAFT_BY_ID[id].shortName)
+                                    .join(' / ')}{' '}
+                                  · {aircraft.missileCount}× {missile.shortName}
+                                </div>
+                              </div>
+                              <span
+                                className={`text-[10.5px] font-mono-tabular font-semibold whitespace-nowrap shrink-0 ${
+                                  isPlaced ? 'text-sky-300' : 'text-blue-300'
                                 }`}
                               >
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-1.5">
-                                    <Plane
-                                      className="h-3 w-3 shrink-0"
-                                      style={{ color: aircraft.accentColor }}
-                                    />
-                                    <span className="text-xs font-semibold text-slate-100 truncate">
-                                      {preset.name}
-                                    </span>
-                                    <span className="text-[10px] text-slate-500 truncate">
-                                      ({preset.region})
-                                    </span>
-                                  </div>
-                                  <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
-                                    {preset.availableAircraftIds
-                                      .map((id) => RUSSIAN_AIRCRAFT_BY_ID[id].shortName)
-                                      .join(' / ')}{' '}
-                                    · {aircraft.missileCount}× {missile.shortName}
-                                  </div>
-                                </div>
-                                <span
-                                  className={`text-[10.5px] font-mono-tabular font-semibold whitespace-nowrap shrink-0 ${
-                                    isPlaced ? 'text-sky-300' : 'text-blue-300'
-                                  }`}
-                                >
-                                  {isPlaced ? 'Перейти' : 'Поставить'}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
+                                {isPlaced ? 'Перейти' : 'На карту'}
+                              </span>
+                            </button>
+                          );
+                        })}
 
                         <button
                           type="button"
                           onClick={handleStartManualUaAirfieldPlacement}
-                          className={`w-full rounded border px-2.5 py-2 text-xs font-semibold transition-colors cursor-pointer ${
+                          className={`w-full px-3 py-2 text-left text-[11px] font-semibold transition-colors cursor-pointer ${
                             pendingAirfieldUa
-                              ? 'border-sky-400 bg-sky-500/20 text-sky-200'
-                              : 'border-slate-700 bg-[#0E1726] hover:border-sky-500/50 text-slate-200'
+                              ? 'bg-sky-500/20 text-sky-200'
+                              : 'text-slate-300 hover:bg-[#0D1522] hover:text-sky-200'
                           }`}
                         >
                           {pendingAirfieldUa
                             ? 'Нажмите на подконтрольную Украину…'
-                            : '+ Поставить свой аэродром ВСУ'}
+                            : '+ Разместить произвольный аэродром ВСУ'}
                         </button>
                       </div>
                     )}
-                  </div>
 
-                  <div className="border border-slate-800 rounded divide-y divide-slate-800/80 overflow-hidden">
                     {MUNITIONS.filter((m) => m.faction === 'UA' && !m.airLaunchedOnly).map((item) => {
                       const isPending =
                         pendingPlacement?.kind === 'strike' && pendingPlacement.id === item.id;
@@ -2666,15 +3026,11 @@ export default function App() {
                           key={item.id}
                           type="button"
                           onClick={() => handleSelectStrikeCatalog(item.id)}
-                          className={`w-full flex items-center gap-2.5 p-2 text-left transition-colors cursor-pointer ${
-                            isPending
-                              ? 'bg-sky-500/16'
-                              : 'bg-[#080D16] hover:bg-[#0E1726]'
+                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                            isPending ? 'bg-sky-500/16' : 'hover:bg-[#0D1522]'
                           }`}
                         >
-                          <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-slate-800 shrink-0 overflow-hidden">
-                            <MunitionIcon id={item.id} className="w-14 h-10" />
-                          </div>
+                          <MunitionIcon id={item.id} className="w-12 h-8 shrink-0" />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-xs font-semibold text-slate-100 truncate">
@@ -2688,11 +3044,8 @@ export default function App() {
                                 {isPending ? 'На карту UA' : `-${item.damage} HP`}
                               </span>
                             </div>
-                            <div className="mt-0.5 text-[11px] text-slate-400 truncate">
-                              {item.category} · {item.realSpeedKmh} км/ч
-                            </div>
-                            <div className="mt-0.5 text-[10.5px] text-slate-500 truncate">
-                              {item.launcherName} · Б/К {item.maxAmmo}
+                            <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
+                              {item.category} · {item.realSpeedKmh} км/ч · Б/К {item.maxAmmo}
                             </div>
                           </div>
                         </button>
@@ -2705,15 +3058,15 @@ export default function App() {
 
             {/* ППО / Air Defense Section */}
             {(catalogFilter === 'all' || catalogFilter === 'pvo') && (
-              <section className={catalogFilter === 'all' ? 'pt-3 border-t border-slate-800' : ''}>
-                <div className="flex items-baseline justify-between mb-2">
-                  <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                    ППО и РЛС защиты
+              <section className={catalogFilter === 'all' ? 'pt-3 border-t border-slate-800 space-y-1.5' : 'space-y-1.5'}>
+                <div className="flex items-baseline justify-between">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                    Средства ППО и РЛС
                   </h2>
-                  <span className="text-[11px] font-mono-tabular text-emerald-400">Автоперехват</span>
+                  <span className="text-[10.5px] font-mono-tabular text-emerald-400">Автоперехват</span>
                 </div>
 
-                <div className="border border-slate-800 rounded divide-y divide-slate-800/80 overflow-hidden">
+                <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
                   {AIR_DEFENSE_SYSTEMS.map((pvo) => {
                     const isPending =
                       pendingPlacement?.kind === 'pvo' && pendingPlacement.id === pvo.id;
@@ -2723,17 +3076,15 @@ export default function App() {
                         key={pvo.id}
                         type="button"
                         onClick={() => handleSelectPvoCatalog(pvo.id)}
-                        className={`w-full flex items-center gap-2.5 p-2 text-left transition-colors cursor-pointer ${
+                        className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
                           isPending
                             ? 'bg-emerald-500/14'
                             : cantAfford
-                              ? 'bg-[#070B12] opacity-55 hover:bg-[#0D1624]'
-                              : 'bg-[#080D16] hover:bg-[#0E1726]'
+                              ? 'opacity-50 hover:bg-[#0D1522]'
+                              : 'hover:bg-[#0D1522]'
                         }`}
                       >
-                        <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-slate-800 shrink-0 overflow-hidden">
-                          <AirDefenseIcon id={pvo.id} className="w-14 h-10" />
-                        </div>
+                        <AirDefenseIcon id={pvo.id} className="w-12 h-8 shrink-0" />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-xs font-semibold text-slate-100 truncate">
@@ -2752,18 +3103,15 @@ export default function App() {
                                 ${pvo.cost}
                               </span>
                             ) : (
-                              <span className="font-mono-tabular text-[11px] font-semibold text-slate-400 whitespace-nowrap shrink-0">
+                              <span className="font-mono-tabular text-[11px] font-semibold text-slate-300 whitespace-nowrap shrink-0">
                                 {pvo.maxHp} HP
                               </span>
                             )}
                           </div>
-                          <div className="mt-0.5 text-[11px] text-slate-400 truncate">
-                            {pvo.category} · {pvo.isRadar ? `Обзор ${pvo.rangeKm} км` : `Радиус ${pvo.rangeKm} км`} · {pvo.maxHp} HP
-                          </div>
-                          <div className="mt-0.5 text-[10.5px] text-slate-500 truncate">
+                          <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
                             {pvo.isRadar
-                              ? 'Скрытые цели · +45% дальности ППО'
-                              : `Б/К ${pvo.maxAmmo} ${pvo.id === 'mg-pickup' ? 'патр.' : pvo.isGun ? 'очередей' : 'ракет'} · КД ${pvo.cooldownSec} с`}
+                              ? `РЛС обзор ${pvo.rangeKm} км · +45% дальности ППО`
+                              : `R ${pvo.rangeKm} км · Б/К ${pvo.maxAmmo} ${pvo.id === 'mg-pickup' ? 'патр.' : pvo.isGun ? 'очер.' : 'ракет'} · ${pvo.cooldownSec}с`}
                           </div>
                         </div>
                       </button>
@@ -2775,20 +3123,20 @@ export default function App() {
 
             {/* Buildings & Infrastructure Objects */}
             {(catalogFilter === 'all' || catalogFilter === 'infra') && (
-              <section className={catalogFilter === 'all' ? 'pt-3 border-t border-slate-800' : ''}>
-                <div className="flex items-baseline justify-between mb-2">
-                  <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                    {gameMode === 'ai' ? 'Защищаемые объекты' : 'Объекты и здания'}
+              <section className={catalogFilter === 'all' ? 'pt-3 border-t border-slate-800 space-y-2' : 'space-y-2'}>
+                <div className="flex items-baseline justify-between">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                    {gameMode === 'ai' ? 'Защищаемые объекты' : 'Инфраструктура и объекты'}
                   </h2>
-                  <span className="text-[11px] font-mono-tabular text-amber-400">
+                  <span className="text-[10.5px] font-mono-tabular text-amber-300">
                     {gameMode === 'ai' ? `+$${aiIncomePerSec}/с` : `${BUILDINGS.length} типов`}
                   </span>
                 </div>
 
                 {/* Building Size Control */}
-                <div className="mb-3 border border-slate-800 rounded bg-[#080D16] p-2.5 space-y-2">
+                <div className="border border-slate-800/90 rounded bg-[#070B12] p-2.5 space-y-2">
                   <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-300 font-medium">Масштаб моделей</span>
+                    <span className="text-slate-300 font-medium">Масштаб объектов на карте</span>
                     <span className="font-mono-tabular font-bold text-sky-300">
                       {Math.round(buildingScale * 100)}%
                     </span>
@@ -2822,7 +3170,7 @@ export default function App() {
                 </div>
 
                 {gameMode === 'sandbox' && (
-                  <div className="border border-slate-800 rounded divide-y divide-slate-800/80 overflow-hidden">
+                  <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
                     {BUILDINGS.map((bldg) => {
                       const isPending =
                         pendingPlacement?.kind === 'infra' && pendingPlacement.id === bldg.id;
@@ -2831,15 +3179,11 @@ export default function App() {
                           key={bldg.id}
                           type="button"
                           onClick={() => handleSelectInfraCatalog(bldg.id)}
-                          className={`w-full flex items-center gap-2.5 p-2 text-left transition-colors cursor-pointer ${
-                            isPending
-                              ? 'bg-sky-500/14'
-                              : 'bg-[#080D16] hover:bg-[#0E1726]'
+                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                            isPending ? 'bg-sky-500/14' : 'hover:bg-[#0D1522]'
                           }`}
                         >
-                          <div className="flex h-11 w-15 items-center justify-center rounded bg-[#070B12] border border-slate-800 shrink-0 overflow-hidden">
-                            <BuildingIcon id={bldg.id} className="w-14 h-10" />
-                          </div>
+                          <BuildingIcon id={bldg.id} className="w-12 h-8 shrink-0" />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-xs font-semibold text-slate-100 truncate">
@@ -2853,11 +3197,8 @@ export default function App() {
                                 {isPending ? 'На карту' : `${bldg.maxHp} HP`}
                               </span>
                             </div>
-                            <div className="mt-0.5 text-[11px] text-slate-400 truncate">
-                              {bldg.category} · +{bldg.incomePerSec}$/с
-                            </div>
-                            <div className="mt-0.5 text-[10.5px] text-slate-500 truncate">
-                              {bldg.summary}
+                            <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
+                              {bldg.category} · {bldg.summary}
                             </div>
                           </div>
                         </button>
@@ -2868,36 +3209,30 @@ export default function App() {
               </section>
             )}
 
-            {/* Placed Units List */}
-            {catalogFilter !== 'settings' && (
-              <section className="pt-3 border-t border-slate-800 space-y-2.5">
+            {/* Placed Player Units List (never exposes AI forces or actions) */}
+            {(catalogFilter === 'units' ||
+              catalogFilter === 'all' ||
+              (gameMode === 'ai' && catalogFilter === 'infra')) && (
+              <section
+                className={
+                  catalogFilter === 'units' ? 'space-y-2.5' : 'pt-3 border-t border-slate-800 space-y-2.5'
+                }
+              >
                 <div className="flex items-baseline justify-between">
-                  <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                    На карте
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                    Развёрнуто на карте
                   </h2>
-                  <span className="font-mono-tabular text-xs text-slate-400">
-                    {playerLaunchers.length + playerAirfields.length + airDefenses.length + buildings.length}
+                  <span className="font-mono-tabular text-[11px] font-semibold text-slate-300">
+                    {playerUnitsCount} ед.
                   </span>
                 </div>
 
-                {gameMode === 'ai' && (aiAirfieldsCount > 0 || aiActiveLaunchersCount > 0) && (
-                  <div className="flex items-center justify-between border border-slate-800 rounded bg-[#080D16] px-2.5 py-1.5 text-[11px] font-mono-tabular text-slate-400">
-                    <span>Силы ИИ (РФ)</span>
-                    <span className="text-rose-300">
-                      Аэр {aiAirfieldsCount} · ПУ {aiActiveLaunchersCount}
-                    </span>
-                  </div>
-                )}
-
-                {playerLaunchers.length === 0 &&
-                playerAirfields.length === 0 &&
-                airDefenses.length === 0 &&
-                buildings.length === 0 ? (
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    Выберите единицу выше и установите её кликом по карте.
+                {playerUnitsCount === 0 ? (
+                  <p className="border border-slate-800/80 rounded bg-[#070B12] p-3 text-xs text-slate-500 leading-relaxed">
+                    Выберите ППО, объект или пусковую установку и разместите кликом по карте.
                   </p>
                 ) : (
-                  <div className="border border-slate-800 rounded divide-y divide-slate-800/80 overflow-hidden bg-[#080D16]">
+                  <div className="border border-slate-800/90 rounded divide-y divide-slate-800/80 overflow-hidden bg-[#070B12]">
                     {playerAirfields.map((af) => {
                       const acSpec = RUSSIAN_AIRCRAFT_BY_ID[af.selectedAircraftId];
                       const missileSpec = MUNITION_BY_ID[acSpec.missileId];
@@ -3251,6 +3586,7 @@ export default function App() {
             alertRadiusKm={alertRadiusKm}
             alertHoldoverSec={alertHoldoverSec}
             clearSignal={clearSignal}
+            restoreStatsTrigger={restoreStatsTrigger}
             focusCoords={focusCoords}
             onChangeMapStyle={setMapStyle}
             onPlaceStrikeLauncher={handlePlaceStrikeLauncher}
@@ -3996,7 +4332,7 @@ export default function App() {
             selectedAircraftMissileSpec &&
             airfieldModalStep !== null && (
               <div
-                onClick={() => setAirfieldModalStep(null)}
+                onClick={handleCancelAirfieldSelection}
                 className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/65 p-4"
               >
                 <div
@@ -4031,7 +4367,7 @@ export default function App() {
                       )}
                       <button
                         type="button"
-                        onClick={() => setAirfieldModalStep(null)}
+                        onClick={handleCancelAirfieldSelection}
                         aria-label="Закрыть меню аэродрома"
                         className="flex h-7 w-7 items-center justify-center rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 text-slate-300 cursor-pointer"
                       >
@@ -4181,260 +4517,337 @@ export default function App() {
             )}
 
           {/* Right-Side Statistics & Event Log Drawer */}
-          {eventDrawerOpen && (
-            <div className="absolute top-13 right-3 bottom-3 w-80 sm:w-88 max-w-[calc(100vw-1.5rem)] z-30 flex flex-col rounded border border-slate-700 bg-[#0A111C] overflow-hidden">
-              <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3.5 py-2.5 bg-[#080D16] shrink-0">
-                <div className="flex items-center gap-2 min-w-0">
-                  <BarChart3 className="h-4 w-4 text-sky-400 shrink-0" />
-                  <h2 className="text-sm font-semibold text-slate-100 truncate">
-                    Журнал и статистика
-                  </h2>
+          {eventDrawerOpen && (() => {
+            const visibleJournalEntries = eventLog.filter((ev) => {
+              if (gameMode === 'ai' && ev.kind === 'launch') return false;
+              if (journalFilter === 'all') return true;
+              return ev.kind === journalFilter;
+            });
+            const damagedPvosCount = airDefenses.filter((p) => p.hp < p.maxHp).length;
+            const lowAmmoPvosCount = airDefenses.filter(
+              (p) => !AIR_DEFENSE_BY_ID[p.airDefenseId].isRadar && p.ammo === 0,
+            ).length;
+
+            return (
+              <div className="absolute top-13 right-3 bottom-3 w-84 sm:w-92 max-w-[calc(100vw-1.5rem)] z-30 flex flex-col rounded border border-slate-700/90 bg-[#070B12] overflow-hidden">
+                <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3.5 py-2.5 bg-[#0A111C] shrink-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <BarChart3 className="h-4 w-4 text-sky-400 shrink-0" />
+                    <div className="min-w-0">
+                      <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-100 truncate">
+                        Оперативная сводка и ЖБД
+                      </h2>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playUiClick('back');
+                      setEventDrawerOpen(false);
+                    }}
+                    aria-label="Закрыть панель статистики"
+                    className="flex h-7 w-7 items-center justify-center rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 text-slate-300 cursor-pointer shrink-0"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundFx.playUiClick('back');
-                    setEventDrawerOpen(false);
-                  }}
-                  aria-label="Закрыть панель статистики"
-                  className="flex h-7 w-7 items-center justify-center rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 text-slate-300 cursor-pointer shrink-0"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
+                {/* Tabs: Статистика | Журнал */}
+                <div className="grid grid-cols-2 border-b border-slate-800 bg-[#0A111C] divide-x divide-slate-800 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playUiClick('tab');
+                      setDrawerTab('stats');
+                    }}
+                    className={`flex items-center justify-center gap-1.5 py-2 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                      drawerTab === 'stats'
+                        ? 'bg-[#101A2B] text-white border-b-2 border-sky-400'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <BarChart3 className="h-3.5 w-3.5" />
+                    <span>Сводка ППО</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundFx.playUiClick('tab');
+                      setDrawerTab('log');
+                    }}
+                    className={`flex items-center justify-center gap-1.5 py-2 text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                      drawerTab === 'log'
+                        ? 'bg-[#101A2B] text-white border-b-2 border-sky-400'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <ScrollText className="h-3.5 w-3.5" />
+                    <span>Журнал ({visibleJournalEntries.length})</span>
+                  </button>
+                </div>
 
-              {/* Tabs: Статистика | Журнал */}
-              <div className="grid grid-cols-2 border-b border-slate-800 bg-[#080D16] divide-x divide-slate-800 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundFx.playUiClick('tab');
-                    setDrawerTab('stats');
-                  }}
-                  className={`flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                    drawerTab === 'stats'
-                      ? 'bg-[#121E32] text-white border-b-2 border-sky-400'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <BarChart3 className="h-3.5 w-3.5" />
-                  <span>Статистика</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    soundFx.playUiClick('tab');
-                    setDrawerTab('log');
-                  }}
-                  className={`flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                    drawerTab === 'log'
-                      ? 'bg-[#121E32] text-white border-b-2 border-sky-400'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <ScrollText className="h-3.5 w-3.5" />
-                  <span>Журнал · {eventLog.length}</span>
-                </button>
-              </div>
+                {drawerTab === 'stats' ? (
+                  <div className="tac-scroll flex-1 overflow-y-auto p-3.5 space-y-3">
+                    {/* Clock & Speed Strip */}
+                    <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-800/80 text-xs">
+                      <div className="flex items-center gap-1.5 text-slate-400">
+                        <Clock className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+                        <span>{formatSimClock(simTimeMinutes)}</span>
+                      </div>
+                      <span className="font-mono-tabular text-[11px] text-slate-400">
+                        Темп {timeScale}×
+                      </span>
+                    </div>
 
-              {drawerTab === 'stats' ? (
-                <div className="tac-scroll flex-1 overflow-y-auto p-3.5 space-y-3.5">
-                  {/* Clock & Speed */}
-                  <div className="border border-slate-800 rounded bg-[#080D16] px-3 py-2.5 flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 text-xs text-slate-300">
-                      <Clock className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-                      <span>Игровое время</span>
-                    </div>
-                    <div className="text-right font-mono-tabular">
-                      <div className="text-xs font-bold text-slate-100">
-                        {formatSimClock(simTimeMinutes)}
+                    {/* Intercept Efficiency Progress Strip */}
+                    <div className="border border-slate-800/90 rounded bg-[#0A111C] p-3 space-y-2">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
+                          Эффективность ППО
+                        </span>
+                        <span className="font-mono-tabular text-lg font-bold text-emerald-400">
+                          {interceptAccuracyPct}%
+                        </span>
                       </div>
-                      <div className="text-[10.5px] text-slate-500">
-                        10 мин/с · {timeScale}×
+                      <div className="h-1 w-full bg-slate-800 overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-400 transition-all"
+                          style={{ width: `${interceptAccuracyPct}%` }}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-400">
+                        <span>Перехвачено: <strong className="text-emerald-300">{stats.intercepts}</strong></span>
+                        <span>Промахи: <strong className="text-amber-300">{stats.misses}</strong></span>
                       </div>
                     </div>
-                  </div>
 
-                  {/* Key Combat Counters Grid */}
-                  <div className="grid grid-cols-2 border border-slate-800 rounded overflow-hidden bg-[#080D16] divide-x divide-y divide-slate-800/80">
-                    <div className="p-2.5">
-                      <div className="text-[11px] text-slate-400">Всего запусков</div>
-                      <div className="mt-0.5 font-mono-tabular text-lg font-bold text-slate-100">
-                        {stats.totalLaunches}
+                    {/* Key Combat Counters Grid (AI mode shows strictly own-side defense & damage telemetry) */}
+                    {gameMode === 'ai' ? (
+                      <div className="grid grid-cols-2 border border-slate-800/90 rounded overflow-hidden bg-[#0A111C] divide-x divide-y divide-slate-800/80">
+                        <div className="p-2.5">
+                          <div className="text-[10.5px] text-slate-400">Волна обороны</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-sky-300">
+                            #{aiWaveNumber}
+                          </div>
+                        </div>
+                        <div className="p-2.5">
+                          <div className="text-[10.5px] text-slate-400">Сбито в воздухе</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-emerald-300">
+                            {stats.intercepts}
+                          </div>
+                        </div>
+                        <div className="p-2.5">
+                          <div className="text-[10.5px] text-slate-400">Пропущено ударов</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-rose-300">
+                            {stats.explosions}
+                          </div>
+                        </div>
+                        <div className="p-2.5">
+                          <div className="text-[10.5px] text-slate-400">Живучесть</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-amber-300">
+                            {buildingsIntegrityPct}%
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                    <div className="p-2.5">
-                      <div className="text-[11px] text-slate-400">Точность ППО</div>
-                      <div className="mt-0.5 font-mono-tabular text-lg font-bold text-emerald-400">
-                        {interceptAccuracyPct}%
-                      </div>
-                    </div>
-                    <div className="p-2.5">
-                      <div className="text-[11px] text-slate-400">Сбито в воздухе</div>
-                      <div className="mt-0.5 font-mono-tabular text-lg font-bold text-emerald-300">
-                        {stats.intercepts}
-                      </div>
-                    </div>
-                    <div className="p-2.5">
-                      <div className="text-[11px] text-slate-400">Промахи ППО</div>
-                      <div className="mt-0.5 font-mono-tabular text-lg font-bold text-amber-300">
-                        {stats.misses}
-                      </div>
-                    </div>
-                    <div className="p-2.5">
-                      <div className="text-[11px] text-slate-400">Попаданий / Взрывов</div>
-                      <div className="mt-0.5 font-mono-tabular text-lg font-bold text-rose-300">
-                        {stats.explosions}
-                      </div>
-                    </div>
-                    <div className="p-2.5">
-                      <div className="text-[11px] text-slate-400">Уничтожено по ПУ</div>
-                      <div className="mt-0.5 font-mono-tabular text-lg font-bold text-sky-300">
-                        {stats.destroyedByStrikes}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Airborne Breakdown */}
-                  <div className="border border-slate-800 rounded bg-[#080D16] divide-y divide-slate-800/80">
-                    <div className="flex items-center justify-between px-3 py-2 text-xs">
-                      <span className="font-semibold text-slate-200">В воздухе сейчас</span>
-                      <strong className="font-mono-tabular text-sky-300">{stats.activeFlights}</strong>
-                    </div>
-                    <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                      <span className="text-slate-400">БПЛА-камикадзе</span>
-                      <span className="font-mono-tabular text-amber-300">{stats.activeDrones}</span>
-                    </div>
-                    <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                      <span className="text-slate-400">Крылатые и баллистика</span>
-                      <span className="font-mono-tabular text-rose-300">{stats.activeMissiles}</span>
-                    </div>
-                    <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                      <span className="text-slate-400">Авиация (носители)</span>
-                      <span className="font-mono-tabular text-slate-200">{stats.activeAircraft}</span>
-                    </div>
-                  </div>
-
-                  {/* Infrastructure & Defense Readiness */}
-                  <div className="border border-slate-800 rounded bg-[#080D16] divide-y divide-slate-800/80">
-                    <div className="flex items-center justify-between px-3 py-2 text-xs">
-                      <span className="text-slate-400">Уцелевшие объекты</span>
-                      <strong className="font-mono-tabular text-emerald-300">
-                        {gameMode === 'ai'
-                          ? `${buildings.length}/${INITIAL_AI_BUILDINGS.length}`
-                          : buildings.length}
-                      </strong>
-                    </div>
-                    <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                      <span className="text-slate-400">Общая прочность объектов</span>
-                      <span className="font-mono-tabular text-slate-200">{buildingsIntegrityPct}%</span>
-                    </div>
-                    <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                      <span className="text-slate-400">Батареи ППО и РЛС</span>
-                      <span className="font-mono-tabular text-emerald-300">{airDefenses.length}</span>
-                    </div>
-                    {gameMode === 'ai' && (
-                      <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                        <span className="text-slate-400">Экономика (доход)</span>
-                        <span className="font-mono-tabular text-amber-300">+${aiIncomePerSec}/с</span>
+                    ) : (
+                      <div className="grid grid-cols-2 border border-slate-800/90 rounded overflow-hidden bg-[#0A111C] divide-x divide-y divide-slate-800/80">
+                        <div className="p-2.5">
+                          <div className="text-[10.5px] text-slate-400">Всего запусков</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-slate-100">
+                            {stats.totalLaunches}
+                          </div>
+                        </div>
+                        <div className="p-2.5">
+                          <div className="text-[10.5px] text-slate-400">Сбито в воздухе</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-emerald-300">
+                            {stats.intercepts}
+                          </div>
+                        </div>
+                        <div className="p-2.5">
+                          <div className="text-[10.5px] text-slate-400">Прилётов / Взрывов</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-rose-300">
+                            {stats.explosions}
+                          </div>
+                        </div>
+                        <div className="p-2.5">
+                          <div className="text-[10.5px] text-slate-400">Поражено ПУ и ППО</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-sky-300">
+                            {stats.destroyedByStrikes}
+                          </div>
+                        </div>
                       </div>
                     )}
-                    <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                      <span className="text-slate-400">Районы под тревогой</span>
-                      <span className="font-mono-tabular text-slate-200">
-                        <span className="text-yellow-300">{stats.droneAlertRaions}</span>
-                        {' / '}
-                        <span className="text-red-400">{stats.missileAlertRaions}</span>
-                      </span>
+
+                    {/* Radar Air Picture */}
+                    <div className="border border-slate-800/90 rounded bg-[#0A111C] divide-y divide-slate-800/80">
+                      <div className="flex items-center justify-between px-3 py-2 text-xs">
+                        <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+                          <Radar className="h-3.5 w-3.5 text-sky-400" />
+                          <span>Обстановка на радарах</span>
+                        </span>
+                        <strong className="font-mono-tabular text-sky-300">{stats.activeFlights}</strong>
+                      </div>
+                      <div className="flex items-center justify-between px-3 py-1.5 text-xs">
+                        <span className="text-slate-400">БПЛА</span>
+                        <span className="font-mono-tabular text-amber-300">{stats.activeDrones}</span>
+                      </div>
+                      <div className="flex items-center justify-between px-3 py-1.5 text-xs">
+                        <span className="text-slate-400">Ракеты и КАБ</span>
+                        <span className="font-mono-tabular text-rose-300">{stats.activeMissiles}</span>
+                      </div>
+                      <div className="flex items-center justify-between px-3 py-1.5 text-xs">
+                        <span className="text-slate-400">Авиация</span>
+                        <span className="font-mono-tabular text-slate-200">{stats.activeAircraft}</span>
+                      </div>
+                    </div>
+
+                    {/* Defense Infrastructure Status */}
+                    <div className="border border-slate-800/90 rounded bg-[#0A111C] divide-y divide-slate-800/80">
+                      <div className="flex items-center justify-between px-3 py-2 text-xs">
+                        <span className="text-slate-400">Объекты в строю</span>
+                        <strong className="font-mono-tabular text-emerald-300">
+                          {gameMode === 'ai'
+                            ? `${buildings.length}/${INITIAL_AI_BUILDINGS.length} (${buildingsIntegrityPct}%)`
+                            : `${buildings.length} (${buildingsIntegrityPct}%)`}
+                        </strong>
+                      </div>
+                      <div className="flex items-center justify-between px-3 py-1.5 text-xs">
+                        <span className="text-slate-400">Средства ППО и РЛС</span>
+                        <span className="font-mono-tabular text-emerald-300">
+                          {airDefenses.length}
+                          {(damagedPvosCount > 0 || lowAmmoPvosCount > 0) && (
+                            <span className="text-amber-300">
+                              {' '}({damagedPvosCount > 0 ? `${damagedPvosCount} повр.` : ''}{damagedPvosCount > 0 && lowAmmoPvosCount > 0 ? ' · ' : ''}{lowAmmoPvosCount > 0 ? `${lowAmmoPvosCount} б/к` : ''})
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      {gameMode === 'ai' && (
+                        <div className="flex items-center justify-between px-3 py-1.5 text-xs">
+                          <span className="text-slate-400">Доход от объектов</span>
+                          <span className="font-mono-tabular text-amber-300">+${aiIncomePerSec}/с</span>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between px-3 py-1.5 text-xs">
+                        <span className="text-slate-400">Тревоги (БПЛА / Ракеты)</span>
+                        <span className="font-mono-tabular text-slate-200">
+                          <span className="text-yellow-300">{stats.droneAlertRaions}</span>
+                          {' / '}
+                          <span className="text-red-400">{stats.missileAlertRaions}</span>
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ) : (
-                <div className="flex-1 flex flex-col min-h-0">
-                  {eventLog.length > 0 && (
-                    <div className="flex items-center justify-between px-3.5 py-2 border-b border-slate-800 bg-[#080D16] shrink-0">
-                      <span className="text-[11px] font-mono-tabular text-slate-400">
-                        Записей: {eventLog.length}/40
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setEventLog([])}
-                        className="rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 px-2 py-0.5 text-[11px] font-medium text-slate-300 cursor-pointer"
-                      >
-                        Очистить
-                      </button>
+                ) : (
+                  <div className="flex-1 flex flex-col min-h-0">
+                    {/* Operational Log Category Filter */}
+                    <div className="flex items-center justify-between gap-1 px-2.5 py-2 border-b border-slate-800 bg-[#0A111C] shrink-0">
+                      <div className="flex items-center gap-1 min-w-0 overflow-x-auto">
+                        {(
+                          [
+                            { id: 'all', label: 'Все' },
+                            { id: 'intercept', label: 'Сбития' },
+                            { id: 'impact', label: 'Прилёты' },
+                            { id: 'miss', label: 'Промахи' },
+                            ...(gameMode === 'sandbox' ? [{ id: 'launch' as const, label: 'Пуски' }] : []),
+                          ] as Array<{ id: JournalFilter; label: string }>
+                        ).map((f) => (
+                          <button
+                            key={f.id}
+                            type="button"
+                            onClick={() => {
+                              soundFx.playUiClick('tab');
+                              setJournalFilter(f.id);
+                            }}
+                            className={`px-2 py-1 text-[10.5px] font-medium rounded-xs whitespace-nowrap cursor-pointer transition-colors ${
+                              journalFilter === f.id
+                                ? 'bg-sky-500/20 text-sky-200 border border-sky-500/45'
+                                : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                            }`}
+                          >
+                            {f.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {eventLog.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setEventLog([])}
+                          className="rounded-xs border border-slate-800 bg-[#0E1726] hover:border-slate-700 px-2 py-1 text-[10.5px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          Очистить
+                        </button>
+                      )}
                     </div>
-                  )}
 
-                  <div className="tac-scroll flex-1 overflow-y-auto">
-                    {eventLog.length === 0 ? (
-                      <p className="p-4 text-xs text-slate-400 leading-relaxed">
-                        События пусков, перехватов ППО и ударов появятся здесь автоматически.
-                      </p>
-                    ) : (
-                      <div className="divide-y divide-slate-800/80">
-                        {eventLog.map((ev) => {
-                          const spec = MUNITION_BY_ID[ev.munitionId];
-                          const timeStr = formatSimTimeShort(ev.simTimeMinutes);
+                    <div className="tac-scroll flex-1 overflow-y-auto">
+                      {visibleJournalEntries.length === 0 ? (
+                        <p className="p-4 text-xs text-slate-500 leading-relaxed">
+                          Дежурный журнал чист — перехваты ППО, промахи и зафиксированные удары появятся здесь в реальном времени.
+                        </p>
+                      ) : (
+                        <div className="divide-y divide-slate-800/80">
+                          {visibleJournalEntries.map((ev) => {
+                            const spec = MUNITION_BY_ID[ev.munitionId];
+                            const timeStr = formatSimTimeShort(ev.simTimeMinutes);
 
-                          const meta =
-                            ev.kind === 'intercept'
-                              ? {
-                                  label: 'Перехват',
-                                  colorClass: 'text-emerald-300',
-                                  Icon: ShieldCheck,
-                                }
-                              : ev.kind === 'miss'
+                            const meta =
+                              ev.kind === 'intercept'
                                 ? {
-                                    label: 'Промах ППО',
-                                    colorClass: 'text-amber-300',
-                                    Icon: ShieldAlert,
+                                    tag: 'СБИТО',
+                                    tagClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35',
                                   }
-                                : ev.kind === 'impact'
+                                : ev.kind === 'miss'
                                   ? {
-                                      label: 'Удар',
-                                      colorClass: 'text-rose-300',
-                                      Icon: Flame,
+                                      tag: 'ПРОМАХ',
+                                      tagClass: 'bg-amber-500/15 text-amber-300 border-amber-500/35',
                                     }
-                                  : {
-                                      label: 'Запуск',
-                                      colorClass: 'text-sky-300',
-                                      Icon: Rocket,
-                                    };
+                                  : ev.kind === 'impact'
+                                    ? {
+                                        tag: 'ПРИЛЁТ',
+                                        tagClass: 'bg-rose-500/15 text-rose-300 border-rose-500/35',
+                                      }
+                                    : {
+                                        tag: 'ПУСК',
+                                        tagClass: 'bg-sky-500/15 text-sky-300 border-sky-500/35',
+                                      };
 
-                          const IconComp = meta.Icon;
-
-                          return (
-                            <div
-                              key={ev.id}
-                              className="flex items-start gap-2.5 px-3.5 py-2.5 hover:bg-[#0E1726]"
-                            >
-                              <IconComp className={`h-3.5 w-3.5 mt-0.5 shrink-0 ${meta.colorClass}`} />
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="text-xs font-semibold text-slate-100 truncate">
-                                    <span className={meta.colorClass}>{meta.label}</span> ·{' '}
-                                    {spec.shortName}
-                                  </span>
-                                  <span className="font-mono-tabular text-[10.5px] text-slate-400 shrink-0">
-                                    {timeStr}
-                                  </span>
-                                </div>
-                                <div className="mt-0.5 text-[11px] text-slate-400 truncate">
-                                  {spec.category} · {ev.detail}
+                            return (
+                              <div
+                                key={ev.id}
+                                className="flex items-start gap-2.5 px-3 py-2.5 hover:bg-[#0D1522]"
+                              >
+                                <span className="font-mono-tabular text-[11px] font-semibold text-slate-400 pt-0.5 shrink-0">
+                                  {timeStr}
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span
+                                      className={`inline-block rounded-xs border px-1.5 py-0.25 text-[9.5px] font-mono-tabular font-bold tracking-wide shrink-0 ${meta.tagClass}`}
+                                    >
+                                      {meta.tag}
+                                    </span>
+                                    <span className="text-xs font-semibold text-slate-100 truncate">
+                                      {spec.shortName}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 text-[11px] text-slate-400 leading-snug break-words">
+                                    {ev.detail}
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
-            </div>
-          )}
+                )}
+              </div>
+            );
+          })()}
 
           {/* Right-Side Smartphone + Telegram Messenger App */}
           {telegramOpen && (
@@ -4923,7 +5336,7 @@ export default function App() {
                   </div>
 
                   <div className="text-center text-[11px] font-mono-tabular text-slate-400">
-                    Реальное время обороны: {Math.floor(aiSurvivedSec)} с · Запусков противника: {stats.totalLaunches}
+                    Реальное время обороны: {Math.floor(aiSurvivedSec)} с · Пропущено ударов: {stats.explosions}
                   </div>
 
                   <div className="grid grid-cols-2 gap-2.5">
@@ -4937,7 +5350,7 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={handleReturnToMenu}
+                      onClick={handleRequestReturnToMenu}
                       className="flex items-center justify-center gap-2 rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 text-slate-200 font-semibold text-sm py-2.5 transition-colors cursor-pointer"
                     >
                       <span>В меню</span>
@@ -4947,6 +5360,7 @@ export default function App() {
               </div>
             </div>
           )}
+          {sandboxExitModal}
         </main>
       </div>
     </div>

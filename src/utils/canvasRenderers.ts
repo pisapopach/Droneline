@@ -1,4 +1,5 @@
 import type {
+  AirDefenseId,
   AirDefenseSpec,
   AltitudeMode,
   BuildingSpec,
@@ -14,6 +15,7 @@ import {
   getBuildingSpriteCanvas,
   getMunitionSpriteCanvas,
 } from './realisticSprites';
+import { getPvo3DMapLayers } from './threeModelBaker';
 
 export interface ExplosionParticle {
   angle: number;
@@ -1629,86 +1631,94 @@ export function drawAirDefenseUnit(
     ctx.restore();
   }
 
-  // Vehicle chassis & body
-  ctx.save();
-  ctx.rotate(spec.id === 'mg-pickup' ? chassisAngleRad : aimAngleRad);
+  // 3D Three.js Directional Vehicle + Rotating Turret/Radar (or graceful 2D fallback)
+  const pvoDrawSize = spec.id === 'mg-pickup' ? 54 : spec.id === 'radar' ? 60 : 62;
+  const effectiveChassisRad = spec.id === 'mg-pickup' ? chassisAngleRad : spec.id === 'radar' ? -0.45 : aimAngleRad;
+  const effectiveTurretRad = isRadar
+    ? (isPreview ? 0.35 : (timeSec * 2.15) % (Math.PI * 2))
+    : aimAngleRad;
 
-  // Realistic soft satellite ground shadow
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.46)';
-  ctx.beginPath();
-  ctx.roundRect(
-    spec.id === 'mg-pickup' ? -13 : -15,
-    spec.id === 'mg-pickup' ? -7.5 : -9,
-    spec.id === 'mg-pickup' ? 28 : 32,
-    spec.id === 'mg-pickup' ? 16.5 : 20,
-    4,
+  const layers3d = getPvo3DMapLayers(
+    spec.id,
+    effectiveChassisRad,
+    effectiveTurretRad,
+    ammo,
+    pvoDrawSize,
   );
-  ctx.fill();
 
-  const rimColor = 'rgba(14, 18, 23, 0.85)';
-  drawRealisticPvoTopDown(ctx, spec.id, ammo);
-  ctx.restore();
+  if (layers3d) {
+    if (!layers3d.turretRotates && layers3d.fullSprite) {
+      const residual = effectiveChassisRad - layers3d.binRad;
+      ctx.save();
+      ctx.rotate(residual);
+      ctx.drawImage(
+        layers3d.fullSprite,
+        -pvoDrawSize / 2,
+        -pvoDrawSize / 2,
+        pvoDrawSize,
+        pvoDrawSize,
+      );
+      ctx.restore();
+    } else if (layers3d.chassisSprite && layers3d.turretSprite) {
+      const chResidual = effectiveChassisRad - layers3d.binRad;
+      ctx.save();
+      ctx.rotate(chResidual);
+      ctx.drawImage(
+        layers3d.chassisSprite,
+        -pvoDrawSize / 2,
+        -pvoDrawSize / 2,
+        pvoDrawSize,
+        pvoDrawSize,
+      );
+      ctx.restore();
 
-  // Independent rotating MG turret mounted in pickup cargo bed (aims at targets)
-  if (spec.id === 'mg-pickup') {
-    ctx.save();
-    ctx.rotate(chassisAngleRad);
-    ctx.translate(-5.8, 0);
-    ctx.rotate(aimAngleRad - chassisAngleRad);
-
-    // Gunner pedestal ring
-    ctx.fillStyle = '#333940';
-    ctx.strokeStyle = rimColor;
-    ctx.lineWidth = 0.7;
-    ctx.beginPath();
-    ctx.arc(0, 0, 3.2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    // Ammo box
-    ctx.fillStyle = '#4B573C';
-    ctx.fillRect(-1.2, 1.5, 2.8, 2.2);
-
-    // Heavy machine gun receiver & barrel + flash hider
-    ctx.fillStyle = '#23282E';
-    ctx.fillRect(-2.5, -1.1, 6.2, 2.2);
-    ctx.strokeStyle = '#737B84';
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(3.2, 0);
-    ctx.lineTo(11.5, 0);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // Spinning search radar bar / phased-array dish on top (skip for MG pickup)
-  if (!isEmpty && spec.id !== 'mg-pickup' && (!isPreview || isRadar)) {
-    ctx.save();
-    ctx.rotate(timeSec * (isRadar ? 2.2 : 3.2));
-    if (isRadar) {
-      ctx.fillStyle = '#1B222A';
-      ctx.strokeStyle = '#6E8091';
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.roundRect(-11, -2.8, 22, 5.6, 1.4);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.strokeStyle = '#9BC6D9';
-      ctx.lineWidth = 1.3;
-      ctx.beginPath();
-      ctx.moveTo(-8, 0);
-      ctx.lineTo(8, 0);
-      ctx.stroke();
-    } else {
-      ctx.strokeStyle = '#9AA4AE';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(-5.5, 0);
-      ctx.lineTo(5.5, 0);
-      ctx.stroke();
+      const tuResidual = effectiveTurretRad - layers3d.turretBinRad;
+      ctx.save();
+      ctx.translate(layers3d.turretOffsetX, layers3d.turretOffsetY);
+      ctx.rotate(tuResidual);
+      ctx.drawImage(
+        layers3d.turretSprite,
+        -pvoDrawSize / 2,
+        -pvoDrawSize / 2,
+        pvoDrawSize,
+        pvoDrawSize,
+      );
+      ctx.restore();
     }
+  } else {
+    // 2D fallback when WebGL is unavailable
+    ctx.save();
+    ctx.rotate(spec.id === 'mg-pickup' ? chassisAngleRad : aimAngleRad);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.46)';
+    ctx.beginPath();
+    ctx.roundRect(
+      spec.id === 'mg-pickup' ? -13 : -15,
+      spec.id === 'mg-pickup' ? -7.5 : -9,
+      spec.id === 'mg-pickup' ? 28 : 32,
+      spec.id === 'mg-pickup' ? 16.5 : 20,
+      4,
+    );
+    ctx.fill();
+    drawRealisticPvoTopDown(ctx, spec.id, ammo);
     ctx.restore();
+
+    if (spec.id === 'mg-pickup') {
+      ctx.save();
+      ctx.rotate(chassisAngleRad);
+      ctx.translate(-5.8, 0);
+      ctx.rotate(aimAngleRad - chassisAngleRad);
+      ctx.fillStyle = '#333940';
+      ctx.beginPath();
+      ctx.arc(0, 0, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#737B84';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(3.2, 0);
+      ctx.lineTo(11.5, 0);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   if (isTargetLocked && !isPreview) {
@@ -1819,7 +1829,11 @@ export function drawAirDefenseUnit(
 }
 
 /**
- * Draws a muzzle flash & booster ignition exhaust plume right out of the ППО launcher.
+ * Draws a multi-stage realistic missile launch animation directly from a ППО launcher:
+ * - S-300PS: vertical cold-launch gas-generator puff + ejecting missile + mid-air booster ignition
+ * - IRIS-T SLM: vertical VLS efflux smoke collar + bright vertical booster flame column
+ * - Patriot M901: canted canister forward ignition spear + fierce rear backblast jet & dust ring
+ * - Gepard / MG Pickup: muzzle blasts & propellant wisps
  */
 export function drawPvoLaunchPlume(
   ctx: CanvasRenderingContext2D,
@@ -1831,97 +1845,257 @@ export function drawPvoLaunchPlume(
   isGun: boolean,
   isSmallBullet: boolean,
   accentColor: string,
+  airDefenseId?: AirDefenseId,
 ) {
   const t = Math.min(1, age / Math.max(0.05, duration));
   ctx.save();
   ctx.translate(x, y);
-  ctx.rotate(angleRad);
 
   if (isGun) {
-    // Gun muzzle flash at barrel tip (+14..21px forward)
-    const muzzleX = isSmallBullet ? 12 : 19;
-    const offsets = isSmallBullet ? [0] : [-5.5, 5.5];
-    if (t < 0.45) {
-      const fAlpha = 1 - t / 0.45;
+    ctx.rotate(angleRad);
+    const muzzleX = isSmallBullet ? 15 : 22;
+    const offsets = isSmallBullet ? [0] : [-6, 6];
+    if (t < 0.48) {
+      const fAlpha = 1 - t / 0.48;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
       for (const oy of offsets) {
-        const rad = (isSmallBullet ? 5.5 : 8.5) * (0.6 + (t / 0.45) * 0.6);
+        const rad = (isSmallBullet ? 6.5 : 10.5) * (0.65 + (t / 0.48) * 0.55);
         const grad = ctx.createRadialGradient(muzzleX, oy, 0, muzzleX, oy, rad);
-        grad.addColorStop(0, `rgba(255, 255, 240, ${fAlpha})`);
-        grad.addColorStop(0.45, `rgba(253, 224, 71, ${fAlpha * 0.8})`);
+        grad.addColorStop(0, `rgba(255, 255, 244, ${fAlpha})`);
+        grad.addColorStop(0.45, `rgba(253, 224, 71, ${fAlpha * 0.85})`);
         grad.addColorStop(1, 'rgba(249, 115, 22, 0)');
         ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.arc(muzzleX, oy, rad, 0, Math.PI * 2);
         ctx.fill();
       }
+      ctx.restore();
     }
-    const puffAlpha = Math.sin(t * Math.PI) * 0.35;
-    const puffRad = (isSmallBullet ? 4 : 7) + t * 8;
-    const sGrad = ctx.createRadialGradient(muzzleX + t * 5, 0, 0.5, muzzleX + t * 5, 0, puffRad);
-    sGrad.addColorStop(0, `rgba(203, 213, 225, ${puffAlpha})`);
+    const puffAlpha = Math.sin(t * Math.PI) * 0.42;
+    const puffRad = (isSmallBullet ? 4.5 : 8) + t * 10;
+    const sGrad = ctx.createRadialGradient(muzzleX + t * 7, 0, 0.5, muzzleX + t * 7, 0, puffRad);
+    sGrad.addColorStop(0, `rgba(226, 232, 240, ${puffAlpha})`);
     sGrad.addColorStop(1, 'rgba(148, 163, 184, 0)');
     ctx.fillStyle = sGrad;
     ctx.beginPath();
-    ctx.arc(muzzleX + t * 5, 0, puffRad, 0, Math.PI * 2);
+    ctx.arc(muzzleX + t * 7, 0, puffRad, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
     return;
   }
 
-  // SAM booster ignition flare & cold-launch exhaust cloud billowing out of the launcher
-  const smokeAlpha = Math.sin(Math.min(1, t * 1.6) * Math.PI * 0.5) * (1 - t) * 0.68;
-  const backDrift = -t * 16;
-  const cloudCenters = [
-    { cx: backDrift, cy: 0, r: 9 + t * 18 },
-    { cx: backDrift - 6, cy: -5 * t, r: 7 + t * 14 },
-    { cx: backDrift - 5, cy: 5 * t, r: 7 + t * 13 },
-  ];
-  for (const c of cloudCenters) {
-    const cg = ctx.createRadialGradient(c.cx, c.cy, 1, c.cx, c.cy, c.r);
-    cg.addColorStop(0, `rgba(241, 245, 249, ${smokeAlpha})`);
-    cg.addColorStop(0.5, `rgba(148, 163, 184, ${smokeAlpha * 0.65})`);
+  // SAM Battery Launch Animation
+  const isS300 = airDefenseId === 's300';
+  const isIris = airDefenseId === 'iris-t';
+  const isVerticalVls = isS300 || isIris;
+
+  // 1. Expanding ground pad dust/efflux shock ring (0..0.48)
+  if (t < 0.48) {
+    const rT = t / 0.48;
+    const ringRad = 10 + (1 - Math.pow(1 - rT, 2.2)) * 34;
+    const ringAlpha = (1 - rT) * 0.65;
+    ctx.strokeStyle = `rgba(203, 213, 225, ${ringAlpha * 0.72})`;
+    ctx.lineWidth = Math.max(1.2, (1 - rT) * 5.2);
+    ctx.beginPath();
+    ctx.ellipse(0, 2, ringRad, ringRad * 0.68, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // 2. Lingering multi-lobe pad launch smoke cloud illuminated by rocket motor underglow
+  const smokeFade = Math.sin(Math.min(1, t * 1.65) * Math.PI * 0.5) * Math.pow(1 - t, 1.18);
+  const glowWarmth = t < 0.38 ? Math.pow(1 - t / 0.38, 1.3) : 0;
+  const backDirX = -Math.cos(angleRad);
+  const backDirY = -Math.sin(angleRad);
+
+  const puffs = isVerticalVls
+    ? [
+        { ox: -10 * t, oy: -4 - 14 * t, r: 9 + t * 20 },
+        { ox: 11 * t, oy: -2 - 11 * t, r: 8 + t * 18 },
+        { ox: 0, oy: 4 - 8 * t, r: 10 + t * 22 },
+        { ox: -5 * t, oy: -18 * t, r: 7 + t * 16 },
+      ]
+    : [
+        { ox: backDirX * (6 + t * 24), oy: backDirY * (6 + t * 24), r: 9 + t * 21 },
+        { ox: backDirX * (12 + t * 32) - 4, oy: backDirY * (12 + t * 32) - 5, r: 8 + t * 18 },
+        { ox: backDirX * (10 + t * 28) + 4, oy: backDirY * (10 + t * 28) + 4, r: 8 + t * 17 },
+        { ox: 0, oy: 0, r: 10 + t * 16 },
+      ];
+
+  for (const p of puffs) {
+    const cg = ctx.createRadialGradient(p.ox, p.oy, 1, p.ox, p.oy, p.r);
+    const rC = Math.min(255, Math.round(215 + glowWarmth * 40));
+    const gC = Math.min(255, Math.round(220 - glowWarmth * 45));
+    const bC = Math.round(228 - glowWarmth * 125);
+    cg.addColorStop(0, `rgba(${rC}, ${gC}, ${bC}, ${smokeFade * 0.72})`);
+    cg.addColorStop(0.5, `rgba(148, 163, 184, ${smokeFade * 0.45})`);
     cg.addColorStop(1, 'rgba(100, 116, 139, 0)');
     ctx.fillStyle = cg;
     ctx.beginPath();
-    ctx.arc(c.cx, c.cy, c.r, 0, Math.PI * 2);
+    ctx.arc(p.ox, p.oy, p.r, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  if (t < 0.52) {
-    const fT = t / 0.52;
-    const fAlpha = 1 - fT;
-    // Bright directional rocket ignition jet emerging forward out of the tube
-    const jetLen = 20 + (1 - fT) * 14;
-    const jetGrad = ctx.createLinearGradient(0, 0, jetLen, 0);
-    jetGrad.addColorStop(0, `rgba(255, 255, 255, ${fAlpha})`);
-    jetGrad.addColorStop(0.45, `rgba(253, 224, 71, ${fAlpha * 0.9})`);
-    jetGrad.addColorStop(1, 'rgba(249, 115, 22, 0)');
-    ctx.fillStyle = jetGrad;
-    ctx.beginPath();
-    ctx.moveTo(4, -3.5);
-    ctx.lineTo(jetLen, 0);
-    ctx.lineTo(4, 3.5);
-    ctx.closePath();
-    ctx.fill();
+  // 3. Stage-specific ignition flame, rear backblast & ascending missile emerging directly from launcher!
+  if (isS300) {
+    // S-300PS Cold-Launch Sequence:
+    // Phase A (0..0.24): Gas-generator steam burst + missile climbing vertically out of 5P85S tube
+    if (t < 0.28) {
+      const cT = t / 0.28;
+      const ejectY = -12 - cT * 24;
+      // Cold gas burst at tube top
+      const steamAlpha = Math.sin(cT * Math.PI) * 0.85;
+      const sg = ctx.createRadialGradient(-2, -10, 0, -2, -10, 11 + cT * 10);
+      sg.addColorStop(0, `rgba(241, 245, 249, ${steamAlpha})`);
+      sg.addColorStop(0.55, `rgba(186, 230, 253, ${steamAlpha * 0.55})`);
+      sg.addColorStop(1, 'rgba(148, 163, 184, 0)');
+      ctx.fillStyle = sg;
+      ctx.beginPath();
+      ctx.arc(-2, -10, 11 + cT * 10, 0, Math.PI * 2);
+      ctx.fill();
 
-    // Base ignition glow over the canister mouth
-    const glowRad = 11 + fT * 11;
-    const glowGrad = ctx.createRadialGradient(8, 0, 0, 8, 0, glowRad);
-    glowGrad.addColorStop(0, `rgba(255, 255, 240, ${fAlpha * 0.92})`);
-    glowGrad.addColorStop(0.5, `${accentColor}66`);
-    glowGrad.addColorStop(1, 'rgba(249, 115, 22, 0)');
-    ctx.fillStyle = glowGrad;
-    ctx.beginPath();
-    ctx.arc(8, 0, glowRad, 0, Math.PI * 2);
-    ctx.fill();
+      // Ejected SAM tube emerging vertically out of canister
+      ctx.save();
+      ctx.translate(-2, ejectY);
+      ctx.fillStyle = '#F1F5F9';
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.85)';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(0, -10);
+      ctx.lineTo(2.4, -4);
+      ctx.lineTo(2.4, 8);
+      ctx.lineTo(-2.4, 8);
+      ctx.lineTo(-2.4, -4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Phase B (0.14..0.52): Mid-air main solid-rocket motor ignition above battery!
+    if (t >= 0.12 && t < 0.52) {
+      const mT = (t - 0.12) / 0.4;
+      const mAlpha = Math.sin(Math.min(1, mT * 1.4) * Math.PI * 0.5) * (1 - mT);
+      const ignY = -28 - mT * 14;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const fRad = 18 + mT * 18;
+      const fg = ctx.createRadialGradient(-2, ignY, 0, -2, ignY, fRad);
+      fg.addColorStop(0, `rgba(255, 255, 255, ${mAlpha})`);
+      fg.addColorStop(0.32, `rgba(253, 224, 71, ${mAlpha * 0.92})`);
+      fg.addColorStop(0.68, `rgba(249, 115, 22, ${mAlpha * 0.55})`);
+      fg.addColorStop(1, 'rgba(234, 88, 12, 0)');
+      ctx.fillStyle = fg;
+      ctx.beginPath();
+      ctx.arc(-2, ignY, fRad, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Downward motor flame cone blasting onto the TEL
+      const jetG = ctx.createLinearGradient(-2, ignY, -2, -6);
+      jetG.addColorStop(0, `rgba(255, 255, 240, ${mAlpha})`);
+      jetG.addColorStop(0.55, `rgba(251, 146, 60, ${mAlpha * 0.82})`);
+      jetG.addColorStop(1, 'rgba(234, 88, 12, 0)');
+      ctx.fillStyle = jetG;
+      ctx.beginPath();
+      ctx.moveTo(-5, ignY);
+      ctx.lineTo(1, ignY);
+      ctx.lineTo(5, -6);
+      ctx.lineTo(-9, -6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  } else if (isIris) {
+    // IRIS-T SLM Hot Vertical VLS Launch: blazing vertical pillar + climbing missile
+    if (t < 0.44) {
+      const fT = t / 0.44;
+      const fAlpha = 1 - Math.pow(fT, 1.3);
+      const climbY = -12 - fT * 36;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const baseGlow = ctx.createRadialGradient(0, -6, 0, 0, -6, 22 + fT * 12);
+      baseGlow.addColorStop(0, `rgba(255, 255, 240, ${fAlpha})`);
+      baseGlow.addColorStop(0.4, `rgba(251, 191, 36, ${fAlpha * 0.85})`);
+      baseGlow.addColorStop(1, 'rgba(234, 88, 12, 0)');
+      ctx.fillStyle = baseGlow;
+      ctx.beginPath();
+      ctx.arc(0, -6, 22 + fT * 12, 0, Math.PI * 2);
+      ctx.fill();
+
+      const colG = ctx.createLinearGradient(0, climbY + 8, 0, -4);
+      colG.addColorStop(0, `rgba(255, 255, 255, ${fAlpha})`);
+      colG.addColorStop(0.5, `rgba(253, 224, 71, ${fAlpha * 0.85})`);
+      colG.addColorStop(1, 'rgba(249, 115, 22, 0)');
+      ctx.fillStyle = colG;
+      ctx.beginPath();
+      ctx.moveTo(-3.2, climbY + 8);
+      ctx.lineTo(3.2, climbY + 8);
+      ctx.lineTo(6.5, -4);
+      ctx.lineTo(-6.5, -4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  } else {
+    // Patriot M901 Canted Canister Launch: Forward booster flare + heavy rear backblast jet!
+    ctx.rotate(angleRad);
+    if (t < 0.46) {
+      const fT = t / 0.46;
+      const fAlpha = 1 - Math.pow(fT, 1.25);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+
+      // Fierce rear backblast flame jet shooting backward (-8..-42px)
+      const blastLen = 28 + (1 - fT) * 18;
+      const backG = ctx.createLinearGradient(-4, 0, -blastLen, 0);
+      backG.addColorStop(0, `rgba(255, 255, 245, ${fAlpha})`);
+      backG.addColorStop(0.4, `rgba(253, 224, 71, ${fAlpha * 0.88})`);
+      backG.addColorStop(0.8, `rgba(249, 115, 22, ${fAlpha * 0.45})`);
+      backG.addColorStop(1, 'rgba(234, 88, 12, 0)');
+      ctx.fillStyle = backG;
+      ctx.beginPath();
+      ctx.moveTo(-4, -3.5);
+      ctx.lineTo(-blastLen, -8.5);
+      ctx.lineTo(-blastLen * 0.82, 0);
+      ctx.lineTo(-blastLen, 8.5);
+      ctx.lineTo(-4, 3.5);
+      ctx.closePath();
+      ctx.fill();
+
+      // Forward ignition spear emerging from canister cap
+      const fwdLen = 22 + fT * 20;
+      const fwdG = ctx.createLinearGradient(8, 0, fwdLen, 0);
+      fwdG.addColorStop(0, `rgba(255, 255, 255, ${fAlpha})`);
+      fwdG.addColorStop(0.5, `rgba(253, 224, 71, ${fAlpha * 0.85})`);
+      fwdG.addColorStop(1, 'rgba(249, 115, 22, 0)');
+      ctx.fillStyle = fwdG;
+      ctx.beginPath();
+      ctx.moveTo(8, -3.2);
+      ctx.lineTo(fwdLen, 0);
+      ctx.lineTo(8, 3.2);
+      ctx.closePath();
+      ctx.fill();
+
+      // Ground thermal glow under launcher
+      const baseGlow = ctx.createRadialGradient(4, 0, 0, 4, 0, 20 + fT * 10);
+      baseGlow.addColorStop(0, `rgba(255, 247, 214, ${fAlpha * 0.92})`);
+      baseGlow.addColorStop(0.55, `${accentColor}55`);
+      baseGlow.addColorStop(1, 'rgba(249, 115, 22, 0)');
+      ctx.fillStyle = baseGlow;
+      ctx.beginPath();
+      ctx.arc(4, 0, 20 + fT * 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
   ctx.restore();
 }
 
 /**
- * Draws a realistic winged SAM interceptor missile with solid-rocket exhaust plume,
- * or 35mm / HMG glowing tracer bursts.
+ * Draws a realistic 3D-shaded winged SAM interceptor missile with solid-rocket Mach
+ * shock-diamond exhaust plume, or 35mm / HMG glowing tracer bursts.
  */
 export function drawSamInterceptor(
   ctx: CanvasRenderingContext2D,
@@ -1931,6 +2105,7 @@ export function drawSamInterceptor(
   isGun: boolean,
   accentColor: string,
   isSmallBullet = false,
+  ageSec = 1,
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -1938,17 +2113,17 @@ export function drawSamInterceptor(
 
   if (isGun) {
     if (isSmallBullet) {
-      ctx.strokeStyle = 'rgba(254, 240, 138, 0.9)';
-      ctx.lineWidth = 1.3;
+      ctx.strokeStyle = 'rgba(254, 240, 138, 0.92)';
+      ctx.lineWidth = 1.4;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(-4, 0);
-      ctx.lineTo(2.5, 0);
+      ctx.moveTo(-4.5, 0);
+      ctx.lineTo(2.8, 0);
       ctx.stroke();
 
       ctx.fillStyle = '#FFFFFF';
       ctx.beginPath();
-      ctx.arc(2.5, 0, 1.0, 0, Math.PI * 2);
+      ctx.arc(2.8, 0, 1.05, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
       return;
@@ -1967,57 +2142,87 @@ export function drawSamInterceptor(
 
     ctx.fillStyle = '#FFFFFF';
     ctx.beginPath();
-    ctx.arc(5, -2.2, 1.1, 0, Math.PI * 2);
-    ctx.arc(8, 2.2, 1.1, 0, Math.PI * 2);
+    ctx.arc(5, -2.2, 1.15, 0, Math.PI * 2);
+    ctx.arc(8, 2.2, 1.15, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
     return;
   }
 
-  // Intense white-amber Mach exhaust flame + smoke cone
-  const flameGrad = ctx.createLinearGradient(-5, 0, -25, 0);
+  // Amplified rocket booster plume during initial launch boost phase (ageSec < 0.7s)
+  const boostFactor = ageSec < 0.7 ? 1 + (1 - ageSec / 0.7) * 0.65 : 1;
+  const flameLen = 28 * boostFactor;
+  const haloRad = 11 * boostFactor;
+
+  // Thruster radial illumination halo
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const haloG = ctx.createRadialGradient(-7, 0, 0, -7, 0, haloRad);
+  haloG.addColorStop(0, 'rgba(255, 250, 220, 0.85)');
+  haloG.addColorStop(0.45, 'rgba(251, 146, 60, 0.45)');
+  haloG.addColorStop(1, 'rgba(234, 88, 12, 0)');
+  ctx.fillStyle = haloG;
+  ctx.beginPath();
+  ctx.arc(-7, 0, haloRad, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Intense white-amber Mach shock-diamond exhaust cone
+  const flameGrad = ctx.createLinearGradient(-5.5, 0, -5.5 - flameLen, 0);
   flameGrad.addColorStop(0, '#FFFFFF');
-  flameGrad.addColorStop(0.28, '#FDE047');
-  flameGrad.addColorStop(0.62, accentColor);
+  flameGrad.addColorStop(0.24, '#FEF08A');
+  flameGrad.addColorStop(0.58, '#FB923C');
   flameGrad.addColorStop(1, 'rgba(249, 115, 22, 0)');
   ctx.fillStyle = flameGrad;
   ctx.beginPath();
-  ctx.moveTo(-5, -2.2);
-  ctx.lineTo(-25, 0);
-  ctx.lineTo(-5, 2.2);
+  ctx.moveTo(-5.5, -2.4 * boostFactor);
+  ctx.lineTo(-5.5 - flameLen, 0);
+  ctx.lineTo(-5.5, 2.4 * boostFactor);
   ctx.closePath();
   ctx.fill();
 
-  // Rear & mid-body SAM stabilizing fins
-  ctx.fillStyle = '#94A3B8';
+  // Subtle Mach shock diamond bright nodes inside exhaust
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+  for (let d = 1; d <= 2; d++) {
+    ctx.beginPath();
+    ctx.ellipse(-5.5 - d * 5.2 * boostFactor, 0, 1.8, 0.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Rear & mid-body SAM stabilizing cruciform fins
+  ctx.fillStyle = '#64748B';
   ctx.beginPath();
-  ctx.moveTo(-3.5, -1.4);
-  ctx.lineTo(-6.2, -4.4);
-  ctx.lineTo(-6.8, -4.4);
-  ctx.lineTo(-6.2, -1.4);
-  ctx.moveTo(-3.5, 1.4);
-  ctx.lineTo(-6.2, 4.4);
-  ctx.lineTo(-6.8, 4.4);
-  ctx.lineTo(-6.2, 1.4);
+  ctx.moveTo(-3.2, -1.5);
+  ctx.lineTo(-6.4, -4.8);
+  ctx.lineTo(-7.2, -4.8);
+  ctx.lineTo(-6.4, -1.5);
+  ctx.moveTo(-3.2, 1.5);
+  ctx.lineTo(-6.4, 4.8);
+  ctx.lineTo(-7.2, 4.8);
+  ctx.lineTo(-6.4, 1.5);
   ctx.fill();
 
-  // Slender tactical SAM fuselage + pointed seeker nose
-  ctx.fillStyle = '#F8FAFC';
-  ctx.strokeStyle = 'rgba(15, 23, 42, 0.75)';
+  // 3D-shaded tactical SAM fuselage cylinder + pointed seeker radome
+  const bodyG = ctx.createLinearGradient(0, -1.9, 0, 1.9);
+  bodyG.addColorStop(0, '#FFFFFF');
+  bodyG.addColorStop(0.55, '#CBD5E1');
+  bodyG.addColorStop(1, '#64748B');
+  ctx.fillStyle = bodyG;
+  ctx.strokeStyle = 'rgba(15, 23, 42, 0.8)';
   ctx.lineWidth = 0.65;
   ctx.beginPath();
-  ctx.moveTo(11.5, 0);
-  ctx.lineTo(6.5, -1.6);
-  ctx.lineTo(-6.2, -1.6);
-  ctx.lineTo(-6.2, 1.6);
-  ctx.lineTo(6.5, 1.6);
+  ctx.moveTo(12.5, 0);
+  ctx.lineTo(7, -1.75);
+  ctx.lineTo(-6.4, -1.75);
+  ctx.lineTo(-6.4, 1.75);
+  ctx.lineTo(7, 1.75);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
 
-  // Dark seeker ring & warhead band
+  // Tactical warhead / guidance color ring
   ctx.fillStyle = accentColor;
-  ctx.fillRect(3.2, -1.5, 1.5, 3.0);
+  ctx.fillRect(3.2, -1.6, 1.8, 3.2);
 
   ctx.restore();
 }
@@ -2269,18 +2474,12 @@ export function drawBuilding(
     ctx.stroke();
   }
 
-  // Render high-res 3D isometric building diorama directly on the satellite map
-  const imgW = 64 * s;
-  const imgH = 49.4 * s;
+  // Render high-res Three.js 3D building diorama directly on the satellite map
+  const imgW = 72 * s;
+  const imgH = 55.8 * s;
   const img = getBuildingSpriteCanvas(spec.id);
   if (img) {
-    ctx.save();
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
-    ctx.shadowBlur = 7 * s;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 2.5 * s;
     ctx.drawImage(img, -imgW / 2, -imgH / 2, imgW, imgH);
-    ctx.restore();
   } else {
     ctx.fillStyle = spec.accentColor;
     ctx.globalAlpha = 0.6;
@@ -2986,6 +3185,7 @@ export function drawAirfield(
     accentColor: string;
     selected?: boolean;
     hovered?: boolean;
+    hideArmament?: boolean;
     isPreview?: boolean;
     previewValid?: boolean;
     timeSec: number;
@@ -3000,6 +3200,7 @@ export function drawAirfield(
     accentColor,
     selected = false,
     hovered = false,
+    hideArmament = false,
     isPreview = false,
     previewValid = true,
     timeSec,
@@ -3083,7 +3284,9 @@ export function drawAirfield(
   if (!isPreview) {
     ctx.globalAlpha = 1;
     const prefix = isUa ? 'АЭР ВСУ' : 'АЭР';
-    const badgeText = `${prefix} ${name} · ${aircraftShortName} (${salvoCount}× ${missileShortName})`;
+    const badgeText = hideArmament
+      ? `${prefix} ${name}`
+      : `${prefix} ${name} · ${aircraftShortName} (${salvoCount}× ${missileShortName})`;
     ctx.font = '700 10px "JetBrains Mono", monospace';
     const bw = ctx.measureText(badgeText).width + 12;
     const bx = -bw / 2;

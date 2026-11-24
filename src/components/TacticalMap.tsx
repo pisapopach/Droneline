@@ -213,6 +213,7 @@ interface SamInterceptor {
   isGun: boolean;
   accentColor: string;
   trail: RoutePoint[];
+  ageSec?: number;
   missed?: boolean;
   overshootAge?: number;
 }
@@ -233,6 +234,7 @@ interface InterceptBurst {
 
 interface PvoLaunchPlume {
   id: string;
+  airDefenseId?: AirDefenseId;
   lat: number;
   lng: number;
   angleDeg: number;
@@ -387,6 +389,7 @@ interface TacticalMapProps {
   alertRadiusKm: number;
   alertHoldoverSec: number;
   clearSignal: number;
+  restoreStatsTrigger?: { seq: number; stats: MapStats } | null;
   focusCoords: { lat: number; lng: number; zoom?: number } | null;
   isMobile?: boolean;
   mobileSteerDir?: -1 | 0 | 1;
@@ -655,6 +658,7 @@ export function TacticalMap({
   alertRadiusKm,
   alertHoldoverSec,
   clearSignal,
+  restoreStatsTrigger = null,
   focusCoords,
   isMobile = false,
   mobileSteerDir = 0,
@@ -1016,6 +1020,16 @@ export function TacticalMap({
     callbacksRef.current.onSelectFlight(null);
     emitMapStats(0, 0);
   }, [clearSignal]);
+
+  useEffect(() => {
+    if (!restoreStatsTrigger) return;
+    totalExplosionsRef.current = restoreStatsTrigger.stats.explosions;
+    totalInterceptsRef.current = restoreStatsTrigger.stats.intercepts;
+    totalMissesRef.current = restoreStatsTrigger.stats.misses;
+    totalLaunchesRef.current = restoreStatsTrigger.stats.totalLaunches;
+    totalDestroyedByStrikesRef.current = restoreStatsTrigger.stats.destroyedByStrikes;
+    emitMapStats(0, 0);
+  }, [restoreStatsTrigger]);
 
   useEffect(() => {
     if (exitFollowCamSignal === 0) return;
@@ -1669,11 +1683,6 @@ export function TacticalMap({
       if (!firstVisibleProfile) {
         firstVisibleProfile = 'airstrike';
       }
-      callbacksRef.current.onTacticalEvent({
-        kind: 'launch',
-        munitionId: aircraftSpec.missileId,
-        detail: `${af.name}: взлёт ${aircraftSpec.shortName} (${sortie.missileCount}× ${missileSpec.shortName})`,
-      });
     }
 
     if (launchedImmediate) {
@@ -1681,18 +1690,6 @@ export function TacticalMap({
     }
     if (firstVisibleProfile) {
       soundFx.playLaunch(firstVisibleProfile);
-    }
-    if (orders.length > 0) {
-      const visibleCount = orders.filter((o) => !o.lowAltitude).length;
-      const stealthCount = orders.filter((o) => o.lowAltitude).length;
-      const summaryParts: string[] = [];
-      if (visibleCount > 0) summaryParts.push(`${visibleCount} рак./БПЛА`);
-      if (stealthCount > 0) summaryParts.push(`${stealthCount} низковыс. БПЛА (нужен РЛС)`);
-      callbacksRef.current.onTacticalEvent({
-        kind: 'launch',
-        munitionId: orders[0].munitionId,
-        detail: `ПУ ИИ (${orders[0].originName}): ${summaryParts.join(' + ')}`,
-      });
     }
 
     callbacksRef.current.onAiWaveOrdersConsumed();
@@ -1917,6 +1914,7 @@ export function TacticalMap({
       let best: PlacedLauncher | null = null;
       let bestDist = isMobileRef.current ? 36 : 26;
       for (const l of launchersRef.current) {
+        if (gameModeRef.current === 'ai' && l.isAi) continue;
         const lp = map.latLngToContainerPoint([l.lat, l.lng]);
         const d = Math.hypot(lp.x - pt.x, lp.y - pt.y);
         if (d < bestDist) {
@@ -1952,6 +1950,7 @@ export function TacticalMap({
       let best: PlacedAirfield | null = null;
       let bestDist = isMobileRef.current ? 38 : 28;
       for (const a of airfieldsRef.current) {
+        if (gameModeRef.current === 'ai' && a.isAi) continue;
         const ap = map.latLngToContainerPoint([a.lat, a.lng]);
         const d = Math.hypot(ap.x - pt.x, ap.y - pt.y);
         if (d < bestDist) {
@@ -2845,44 +2844,45 @@ export function TacticalMap({
     resizeObserver.observe(container);
 
     let animId = 0;
+    let isCleanedUp = false;
     let lastTime = performance.now();
     let trailTimer = 0;
     let alertTimer = 0;
 
     const tick = (now: number) => {
-      const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
-      lastTime = now;
-      const timeSec = now / 1000;
-      trailTimer += dt;
-      alertTimer += dt;
+      try {
+        const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
+        lastTime = now;
+        const timeSec = now / 1000;
+        trailTimer += dt;
+        alertTimer += dt;
 
-      // Smooth 60fps anchored zoom synchronized inside canvas tick (zero drift, zero tile black flash)
-      if (zoomAnimRef.current.active) {
-        const currZoom = map.getZoom();
-        const targetZoom = zoomAnimRef.current.targetZoom;
-        const diff = targetZoom - currZoom;
-        if (Math.abs(diff) < 0.002) {
-          zoomAnimRef.current.active = false;
-          map.setZoomAround(zoomAnimRef.current.anchorPoint, targetZoom, { animate: false });
-        } else {
-          const factor = 1 - Math.exp(-16 * dt);
-          const nextZoom = currZoom + diff * factor;
-          map.setZoomAround(zoomAnimRef.current.anchorPoint, nextZoom, { animate: false });
+        // Smooth 60fps anchored zoom synchronized inside canvas tick (zero drift, zero tile black flash)
+        if (zoomAnimRef.current.active) {
+          const currZoom = map.getZoom();
+          const targetZoom = zoomAnimRef.current.targetZoom;
+          const diff = targetZoom - currZoom;
+          if (Math.abs(diff) < 0.002) {
+            zoomAnimRef.current.active = false;
+            map.setZoomAround(zoomAnimRef.current.anchorPoint, targetZoom, { animate: false });
+          } else {
+            const factor = 1 - Math.exp(-16 * dt);
+            const nextZoom = currZoom + diff * factor;
+            map.setZoomAround(zoomAnimRef.current.anchorPoint, nextZoom, { animate: false });
+          }
         }
-      }
 
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        animId = requestAnimationFrame(tick);
-        return;
-      }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          return;
+        }
 
-      const rect = container.getBoundingClientRect();
-      ctx.clearRect(0, 0, rect.width, rect.height);
+        const rect = container.getBoundingClientRect();
+        ctx.clearRect(0, 0, rect.width, rect.height);
 
-      let statsDirty = false;
-      const recordTrail = trailTimer >= 0.08;
-      if (recordTrail) trailTimer = 0;
+        let statsDirty = false;
+        const recordTrail = trailTimer >= 0.08;
+        if (recordTrail) trailTimer = 0;
 
       const triggerExplosionAt = (
         lat: number,
@@ -3215,6 +3215,25 @@ export function TacticalMap({
         }
         scheduledSalvoRef.current = nextQueue;
       }
+
+      // 3-tier stealth: 'normal' always visible, 'low' needs radar, 'ultra-low' invisible even to radars
+      const isFlightDetected = (flt: ActiveFlight): boolean => {
+        const altMode = getFlightAltitudeMode(flt);
+        if (altMode === 'ultra-low') return false;
+        if (altMode === 'normal') return true;
+        return airDefensesRef.current.some(
+          (r) =>
+            AIR_DEFENSE_BY_ID[r.airDefenseId].isRadar &&
+            r.hp > 0 &&
+            haversineDistanceKm(r.lat, r.lng, flt.lat, flt.lng) <=
+              AIR_DEFENSE_BY_ID[r.airDefenseId].rangeKm,
+        );
+      };
+
+      const isFlightVisible = (flt: ActiveFlight): boolean => {
+        if (isFlightDetected(flt)) return true;
+        return !flt.isAiStrike || gameModeRef.current === 'sandbox';
+      };
 
       const resolveStrikeBlastPower = (munitionId: MunitionId): number => {
         if (munitionId === 'kinzhal') return 1.75;
@@ -3667,12 +3686,14 @@ export function TacticalMap({
 
             forceAlertUpdateRef.current = true;
             soundFx.playLaunch(missileSpec.profile);
-            const finalWp = missileWaypoints[missileWaypoints.length - 1];
-            callbacksRef.current.onTacticalEvent({
-              kind: 'launch',
-              munitionId: missileId,
-              detail: `Пуск с ${carrier.shortName}: ${salvoCount}× ${missileSpec.shortName} (${Math.round(missileDistKm)} км → ${formatLocationLabel(finalWp.lat, finalWp.lng)})`,
-            });
+            if (!(flt.isAiStrike && gameModeRef.current === 'ai')) {
+              const finalWp = missileWaypoints[missileWaypoints.length - 1];
+              callbacksRef.current.onTacticalEvent({
+                kind: 'launch',
+                munitionId: missileId,
+                detail: `Пуск с ${carrier.shortName}: ${salvoCount}× ${missileSpec.shortName} (${Math.round(missileDistKm)} км → ${formatLocationLabel(finalWp.lat, finalWp.lng)})`,
+              });
+            }
           }
 
           const homeAirfield = airfieldsRef.current.find((a) => a.id === flt.airfieldId);
@@ -4146,23 +4167,6 @@ export function TacticalMap({
         (r) => AIR_DEFENSE_BY_ID[r.airDefenseId].isRadar && r.hp > 0,
       );
 
-      // 3-tier stealth: 'normal' always visible, 'low' needs radar, 'ultra-low' invisible even to radars
-      const isFlightDetected = (flt: ActiveFlight): boolean => {
-        const altMode = getFlightAltitudeMode(flt);
-        if (altMode === 'ultra-low') return false;
-        if (altMode === 'normal') return true;
-        return activeRadars.some(
-          (r) =>
-            haversineDistanceKm(r.lat, r.lng, flt.lat, flt.lng) <=
-            AIR_DEFENSE_BY_ID[r.airDefenseId].rangeKm,
-        );
-      };
-
-      const isFlightVisible = (flt: ActiveFlight): boolean => {
-        if (isFlightDetected(flt)) return true;
-        return !flt.isAiStrike || gameModeRef.current === 'sandbox';
-      };
-
       for (const pvo of airDefensesRef.current) {
         const spec = AIR_DEFENSE_BY_ID[pvo.airDefenseId];
         if (spec.isRadar) continue;
@@ -4246,7 +4250,7 @@ export function TacticalMap({
             targetFlight.lng,
           );
           const isSmallBullet = pvo.airDefenseId === 'mg-pickup';
-          const exitOffsetKm = spec.isGun ? 0.65 : 1.45;
+          const exitOffsetKm = spec.isGun ? 0.45 : 0.12;
           const exitPt = computePointAheadKm(pvoPos.lat, pvoPos.lng, bearingDeg, exitOffsetKm);
           interceptorsRef.current.push({
             id: `sam_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -4261,14 +4265,16 @@ export function TacticalMap({
             isGun: spec.isGun,
             accentColor: spec.accentColor,
             trail: [{ lat: pvoPos.lat, lng: pvoPos.lng }, exitPt],
+            ageSec: 0,
           });
           pvoLaunchFlashesRef.current.push({
             id: `plume_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            airDefenseId: pvo.airDefenseId,
             lat: pvoPos.lat,
             lng: pvoPos.lng,
             angleDeg: bearingDeg,
             age: 0,
-            duration: spec.isGun ? 0.28 : 0.78,
+            duration: spec.isGun ? 0.34 : 1.85,
             isGun: spec.isGun,
             isSmallBullet,
             accentColor: spec.accentColor,
@@ -4294,8 +4300,9 @@ export function TacticalMap({
       // C. Update SAM interceptors & resolve mid-air interceptions (including miss probability)
       const nextInterceptors: SamInterceptor[] = [];
       for (const sam of interceptorsRef.current) {
+        sam.ageSec = (sam.ageSec ?? 0) + dt;
         const isSmallBullet = sam.airDefenseId === 'mg-pickup';
-        const maxTrailLen = isSmallBullet ? 5 : 18;
+        const maxTrailLen = isSmallBullet ? 5 : 22;
         if (sam.missed) {
           sam.overshootAge = (sam.overshootAge ?? 0) + dt;
           const stepKm = sam.speedKmPerSec * timeScaleRef.current * dt;
@@ -4868,6 +4875,7 @@ export function TacticalMap({
           pl.isGun,
           pl.isSmallBullet,
           pl.accentColor,
+          pl.airDefenseId,
         );
       }
 
@@ -5837,12 +5845,13 @@ export function TacticalMap({
             const p0 = map.latLngToContainerPoint([sam.trail[i - 1].lat, sam.trail[i - 1].lng]);
             const p1 = map.latLngToContainerPoint([sam.trail[i].lat, sam.trail[i].lng]);
             const ratio = i / sam.trail.length;
+            const boostBoost = !sam.isGun && (sam.ageSec ?? 1) < 0.75 ? 1.45 : 1;
             ctx.strokeStyle = isSmallBullet
               ? `rgba(253, 224, 71, ${ratio * 0.72})`
               : sam.isGun
                 ? `rgba(254, 240, 138, ${ratio * 0.55})`
-                : `rgba(241, 245, 249, ${ratio * 0.72})`;
-            ctx.lineWidth = isSmallBullet ? 1.0 : sam.isGun ? 1.4 : 1.8 * ratio;
+                : `rgba(241, 245, 249, ${Math.min(0.9, ratio * 0.78 * boostBoost)})`;
+            ctx.lineWidth = isSmallBullet ? 1.0 : sam.isGun ? 1.4 : 2.1 * ratio * boostBoost;
             ctx.beginPath();
             ctx.moveTo(p0.x, p0.y);
             ctx.lineTo(p1.x, p1.y);
@@ -5859,6 +5868,7 @@ export function TacticalMap({
           sam.isGun,
           sam.accentColor,
           isSmallBullet,
+          sam.ageSec ?? 1,
         );
       }
 
@@ -5906,8 +5916,9 @@ export function TacticalMap({
         }
       }
 
-      // 6. Render placed strike launchers
+      // 6. Render placed strike launchers (hide hidden enemy AI field launchers/ships in AI mode)
       for (const l of launchersRef.current) {
+        if (gameModeRef.current === 'ai' && l.isAi) continue;
         const pt = map.latLngToContainerPoint([l.lat, l.lng]);
         const spec = MUNITION_BY_ID[l.munitionId];
         const isSel = selectedRef.current === l.id;
@@ -5936,12 +5947,8 @@ export function TacticalMap({
           ctx.save();
           ctx.font = '600 11px "Plus Jakarta Sans", sans-serif';
           const tag = l.isNavalShip
-            ? l.isAi
-              ? 'Корабль ИИ · Калибр'
-              : 'Корабль ВМФ · Калибр'
-            : l.isAi
-              ? `ПУ ИИ · ${spec.shortName}`
-              : `ПУ · ${spec.shortName}`;
+            ? 'Корабль ВМФ · Калибр'
+            : `ПУ · ${spec.shortName}`;
           const tw = ctx.measureText(tag).width;
           ctx.fillStyle = 'rgba(7, 13, 23, 0.88)';
           ctx.strokeStyle = isSel ? spec.accentColor : 'rgba(148, 163, 184, 0.4)';
@@ -5956,13 +5963,14 @@ export function TacticalMap({
         }
       }
 
-      // 6.5. Render placed Russian airfields
+      // 6.5. Render placed airfields (hide AI armament/salvo details in AI defense mode)
       for (const af of airfieldsRef.current) {
         const pt = map.latLngToContainerPoint([af.lat, af.lng]);
         const aircraftSpec = RUSSIAN_AIRCRAFT_BY_ID[af.selectedAircraftId];
         const missileSpec = MUNITION_BY_ID[aircraftSpec.missileId];
-        const isSel = selectedAirfieldRef.current === af.id;
-        const isHov = hoveredAirfieldIdRef.current === af.id;
+        const isAiBase = gameModeRef.current === 'ai' && Boolean(af.isAi);
+        const isSel = !isAiBase && selectedAirfieldRef.current === af.id;
+        const isHov = !isAiBase && hoveredAirfieldIdRef.current === af.id;
         const salvo = Math.max(1, Math.min(aircraftSpec.missileCount, af.salvoCount || aircraftSpec.missileCount));
 
         drawAirfield(ctx, pt.x, pt.y, {
@@ -5975,15 +5983,15 @@ export function TacticalMap({
           faction: af.faction,
           selected: isSel,
           hovered: isHov,
+          hideArmament: isAiBase,
           timeSec,
         });
 
         if (isSel || isHov) {
           ctx.save();
           ctx.font = '600 11px "Plus Jakarta Sans", sans-serif';
-          const tag = af.isAi
-            ? `База РФ · ${af.name}`
-            : af.faction === 'UA'
+          const tag =
+            af.faction === 'UA'
               ? `Аэродром ВСУ · ${af.name}`
               : `Аэродром · ${af.name}`;
           const tw = ctx.measureText(tag).width;
@@ -6250,13 +6258,19 @@ export function TacticalMap({
         const pt = map.latLngToContainerPoint([exp.lat, exp.lng]);
         drawExplosion(ctx, pt.x, pt.y, exp);
       }
-
-      animId = requestAnimationFrame(tick);
+      } catch (err) {
+        console.error('[TacticalMap] tick error:', err);
+      } finally {
+        if (!isCleanedUp) {
+          animId = requestAnimationFrame(tick);
+        }
+      }
     };
 
     animId = requestAnimationFrame(tick);
 
     return () => {
+      isCleanedUp = true;
       cancelAnimationFrame(animId);
       resizeObserver.disconnect();
       map.off('dragstart', onDragStart);

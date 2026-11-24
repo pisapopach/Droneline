@@ -1,5 +1,6 @@
 import type { AirDefenseId, BuildingId, MunitionId } from '../data/munitions';
 import type { RussianAircraftId } from '../data/airfields';
+import { bakeBuilding3DCanvas, bakePvoMenu3DCanvas } from './threeModelBaker';
 
 // Cached offscreen canvases & data URLs (populated lazily on first use in browser)
 const buildingCanvasCache: Partial<Record<BuildingId | 'airfield', HTMLCanvasElement>> = {};
@@ -1123,7 +1124,7 @@ function bakeBuildingDiorama(kind: BuildingId | 'airfield'): HTMLCanvasElement {
 export function getBuildingSpriteCanvas(id: BuildingId | 'airfield'): HTMLCanvasElement | null {
   if (typeof document === 'undefined') return null;
   if (!buildingCanvasCache[id]) {
-    buildingCanvasCache[id] = bakeBuildingDiorama(id);
+    buildingCanvasCache[id] = bakeBuilding3DCanvas(id) ?? bakeBuildingDiorama(id);
   }
   return buildingCanvasCache[id] ?? null;
 }
@@ -2685,6 +2686,12 @@ export function getLauncherSpriteDataUrl(id: MunitionId): string {
 export function getPvoSpriteDataUrl(id: AirDefenseId): string {
   if (pvoUrlCache[id]) return pvoUrlCache[id]!;
   if (typeof document === 'undefined') return '';
+  const baked3d = bakePvoMenu3DCanvas(id);
+  if (baked3d) {
+    const url = baked3d.toDataURL('image/png');
+    pvoUrlCache[id] = url;
+    return url;
+  }
   const W = 220;
   const H = 150;
   const c = document.createElement('canvas');
