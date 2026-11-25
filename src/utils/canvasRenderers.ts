@@ -123,6 +123,7 @@ export function drawLauncher(
     ammo?: number;
     maxAmmo?: number;
     isNavalShip?: boolean;
+    isAi?: boolean;
     timeSec: number;
   },
 ) {
@@ -136,6 +137,7 @@ export function drawLauncher(
     ammo = spec.maxAmmo,
     maxAmmo = spec.maxAmmo,
     isNavalShip = false,
+    isAi = false,
     timeSec,
   } = options;
 
@@ -167,11 +169,20 @@ export function drawLauncher(
     ctx.arc(0, 0, 23, 0, Math.PI * 2);
     ctx.fill();
   } else if (hovered && !isPreview) {
-    ctx.strokeStyle = 'rgba(241, 245, 249, 0.75)';
+    ctx.strokeStyle = isAi ? 'rgba(239, 68, 68, 0.85)' : 'rgba(241, 245, 249, 0.75)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.arc(0, 0, 23, 0, Math.PI * 2);
     ctx.stroke();
+  } else if (isAi && !isPreview) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
+    ctx.lineWidth = 1.25;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(0, 0, 22, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   } else if (isPreview) {
     ctx.strokeStyle = previewValid ? '#22C55E' : '#EF4444';
     ctx.lineWidth = 2;
@@ -2422,6 +2433,7 @@ export function drawBuilding(
     isTargetLocked?: boolean;
     isPreview?: boolean;
     previewValid?: boolean;
+    isAi?: boolean;
     timeSec: number;
   },
 ) {
@@ -2433,6 +2445,7 @@ export function drawBuilding(
     isTargetLocked = false,
     isPreview = false,
     previewValid = true,
+    isAi = false,
     timeSec,
   } = options;
 
@@ -2467,11 +2480,20 @@ export function drawBuilding(
     ctx.arc(0, 0, 25 * s, 0, Math.PI * 2);
     ctx.fill();
   } else if (hovered) {
-    ctx.strokeStyle = spec.accentColor;
+    ctx.strokeStyle = isAi ? '#F87171' : spec.accentColor;
     ctx.lineWidth = 1.6;
     ctx.beginPath();
     ctx.arc(0, 0, 26 * s, 0, Math.PI * 2);
     ctx.stroke();
+  } else if (isAi) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.5)';
+    ctx.lineWidth = 1.3;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(0, 0, 25 * s, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Render high-res Three.js 3D building diorama directly on the satellite map
@@ -2589,7 +2611,11 @@ export function drawBuilding(
     const by = imgH / 2 + 4;
 
     ctx.fillStyle = 'rgba(7, 13, 23, 0.9)';
-    ctx.strokeStyle = isTargetLocked ? 'rgba(239, 68, 68, 0.85)' : 'rgba(148, 163, 184, 0.42)';
+    ctx.strokeStyle = isTargetLocked
+      ? 'rgba(239, 68, 68, 0.85)'
+      : isAi
+        ? 'rgba(239, 68, 68, 0.6)'
+        : 'rgba(148, 163, 184, 0.42)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.roundRect(bx, by, bw, 18, 3.5);

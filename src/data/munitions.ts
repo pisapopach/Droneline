@@ -60,10 +60,13 @@ export interface MunitionSpec {
   blastRadiusKm: number;
   maxRangeKm?: number;
   kabMaxRangeKm?: number;
+  cost?: number;
   accentColor: string;
   exhaustColor: string;
   summary: string;
 }
+
+export const UA_AIRFIELD_AI_COST = 650;
 
 export interface AirDefenseSpec {
   id: AirDefenseId;
@@ -218,6 +221,7 @@ export const MUNITIONS: MunitionSpec[] = [
     maxAmmo: 4,
     damage: 45,
     blastRadiusKm: 14,
+    cost: 520,
     accentColor: '#2DD4BF',
     exhaustColor: '#F59E0B',
     summary: 'Украинская противокорабельная и наземная крылатая ракета',
@@ -289,6 +293,7 @@ export const MUNITIONS: MunitionSpec[] = [
     maxAmmo: 6,
     damage: 30,
     blastRadiusKm: 9,
+    cost: 220,
     accentColor: '#38BDF8',
     exhaustColor: '#FDE047',
     summary: 'Украинский дальнобойный дрон-камикадзе, ставится только в Украине',
@@ -307,6 +312,7 @@ export const MUNITIONS: MunitionSpec[] = [
     maxAmmo: 6,
     damage: 25,
     blastRadiusKm: 8,
+    cost: 150,
     accentColor: '#60A5FA',
     exhaustColor: '#FACC15',
     summary: 'Украинский ударный БПЛА схемы «утка», ставится только в Украине',
@@ -325,6 +331,7 @@ export const MUNITIONS: MunitionSpec[] = [
     maxAmmo: 4,
     damage: 40,
     blastRadiusKm: 11,
+    cost: 320,
     accentColor: '#FACC15',
     exhaustColor: '#38BDF8',
     summary: 'Украинский реактивный дрон-ракета, ставится только в Украине',
@@ -343,6 +350,7 @@ export const MUNITIONS: MunitionSpec[] = [
     maxAmmo: 5,
     damage: 45,
     blastRadiusKm: 13,
+    cost: 420,
     accentColor: '#38BDF8',
     exhaustColor: '#FBBF24',
     summary: 'Украинская крылатая ракета-дрон ВСУ, ставится только в Украине',
@@ -361,6 +369,7 @@ export const MUNITIONS: MunitionSpec[] = [
     maxAmmo: 2,
     damage: 75,
     blastRadiusKm: 20,
+    cost: 850,
     accentColor: '#FDE047',
     exhaustColor: '#38BDF8',
     summary: 'Украинская оперативно-тактическая баллистическая ракета',
@@ -379,6 +388,7 @@ export const MUNITIONS: MunitionSpec[] = [
     maxAmmo: 2,
     damage: 85,
     blastRadiusKm: 18,
+    cost: 780,
     accentColor: '#F472B6',
     exhaustColor: '#FDE047',
     summary: 'Тяжёлая дальнобойная украинская крылатая ракета (БЧ ~1000 кг)',

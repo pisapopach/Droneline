@@ -76,8 +76,14 @@ export interface AiAirfieldSortieOrder {
   delaySec: number;
 }
 
-export const AI_STARTING_MONEY = 750;
+export const AI_STARTING_MONEY = 950;
 export const AI_FIRST_WAVE_PREP_SEC = 10;
+export const AI_LAUNCHER_KILL_BOUNTY = 90;
+
+export function getAiBuildingBounty(buildingId: BuildingId): number {
+  const maxHp = BUILDING_BY_ID[buildingId].maxHp;
+  return Math.max(120, Math.round(maxHp * 0.9));
+}
 
 export const INITIAL_AI_BUILDINGS: InitialBuildingTemplate[] = [
   { id: 'ai_bldg_kyiv', label: 'Киев (ТЭС)', buildingId: 'power-plant', lat: 50.4501, lng: 30.5234 },
@@ -98,6 +104,21 @@ export const INITIAL_AI_BUILDINGS: InitialBuildingTemplate[] = [
   { id: 'ai_bldg_khmel', label: 'Хмельницкий (ТЭС)', buildingId: 'power-plant', lat: 49.4229, lng: 26.9871 },
   { id: 'ai_bldg_rivne', label: 'Ровно (Ж/Д узел)', buildingId: 'railway-hub', lat: 50.6199, lng: 26.2516 },
   { id: 'ai_bldg_ivano', label: 'Ивано-Франковск (Квартал)', buildingId: 'residential', lat: 48.9226, lng: 24.7111 },
+];
+
+export const INITIAL_AI_ENEMY_BUILDINGS: InitialBuildingTemplate[] = [
+  { id: 'ai_ru_belgorod', label: 'Белгород (НПЗ)', buildingId: 'oil-depot', lat: 50.595, lng: 36.587 },
+  { id: 'ai_ru_kursk', label: 'Курск (Склад БК)', buildingId: 'ammo-depot', lat: 51.737, lng: 36.187 },
+  { id: 'ai_ru_voronezh', label: 'Воронеж (Воен. база)', buildingId: 'military-base', lat: 51.672, lng: 39.184 },
+  { id: 'ai_ru_bryansk', label: 'Брянск (Завод)', buildingId: 'factory', lat: 53.243, lng: 34.363 },
+  { id: 'ai_ru_millerovo', label: 'Миллерово (Воен. база)', buildingId: 'military-base', lat: 48.953, lng: 40.297 },
+  { id: 'ai_ru_primorsko', label: 'Приморско-Ахтарск (Склад БК)', buildingId: 'ammo-depot', lat: 46.048, lng: 38.175 },
+  { id: 'ai_ru_novorossiysk', label: 'Новороссийск (Порт)', buildingId: 'port', lat: 44.723, lng: 37.768 },
+  { id: 'ai_ru_tuapse', label: 'Туапсе (НПЗ)', buildingId: 'oil-depot', lat: 44.105, lng: 39.077 },
+  { id: 'ai_ru_taganrog', label: 'Таганрог (Ж/Д узел)', buildingId: 'railway-hub', lat: 47.236, lng: 38.896 },
+  { id: 'ai_ru_rostov', label: 'Ростов-на-Дону (Штаб / КП)', buildingId: 'command-center', lat: 47.235, lng: 39.701 },
+  { id: 'ai_ru_melitopol', label: 'Мелитополь (Воен. база)', buildingId: 'military-base', lat: 46.849, lng: 35.365 },
+  { id: 'ai_ru_engels', label: 'Энгельс (ТЭС)', buildingId: 'power-plant', lat: 51.495, lng: 46.122 },
 ];
 
 export const AI_LAUNCH_ORIGINS: AiLaunchOrigin[] = [
@@ -187,6 +208,22 @@ export function createInitialAiBuildings() {
       lng: tpl.lng,
       hp: spec.maxHp,
       maxHp: spec.maxHp,
+      isAi: false,
+    };
+  });
+}
+
+export function createInitialEnemyAiBuildings() {
+  return INITIAL_AI_ENEMY_BUILDINGS.map((tpl) => {
+    const spec = BUILDING_BY_ID[tpl.buildingId];
+    return {
+      id: tpl.id,
+      buildingId: tpl.buildingId,
+      lat: tpl.lat,
+      lng: tpl.lng,
+      hp: spec.maxHp,
+      maxHp: spec.maxHp,
+      isAi: true,
     };
   });
 }
@@ -199,6 +236,7 @@ export function createInitialAiAirfields() {
       id: `ai_af_${preset.id}`,
       name: preset.name,
       presetId: preset.id,
+      faction: 'RU' as const,
       lat: preset.lat,
       lng: preset.lng,
       selectedAircraftId: preset.defaultAircraftId,

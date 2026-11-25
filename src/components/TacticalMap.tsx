@@ -131,6 +131,7 @@ export interface PlacedBuilding {
   lng: number;
   hp: number;
   maxHp: number;
+  isAi?: boolean;
 }
 
 export interface RoutePoint {
@@ -198,6 +199,7 @@ interface FallingBomb {
   munitionId: MunitionId;
   targetBuildingId?: string;
   targetPvoId?: string;
+  isAiStrike?: boolean;
 }
 
 interface SamInterceptor {
@@ -1603,6 +1605,17 @@ export function TacticalMap({
         });
         totalLaunchesRef.current += 1;
         launchedImmediate = true;
+        const destWp = smoothPath[smoothPath.length - 1];
+        const tgtB = order.targetBuildingId
+          ? buildingsRef.current.find((b) => b.id === order.targetBuildingId)
+          : undefined;
+        callbacksRef.current.onTacticalEvent({
+          kind: 'launch',
+          munitionId: order.munitionId,
+          detail: tgtB
+            ? `${order.originName} → ${BUILDING_BY_ID[tgtB.buildingId].shortName} (${Math.round(totalKm)} км)`
+            : `${order.originName} → ${formatLocationLabel(destWp.lat, destWp.lng)} (${Math.round(totalKm)} км)`,
+        });
         if (launcher) {
           callbacksRef.current.onLaunchStarted(launcher.id, bearingDeg);
         }
@@ -1680,6 +1693,11 @@ export function TacticalMap({
       });
       totalLaunchesRef.current += 1;
       launchedImmediate = true;
+      callbacksRef.current.onTacticalEvent({
+        kind: 'launch',
+        munitionId: aircraftSpec.missileId,
+        detail: `${af.name}: вылет ${aircraftSpec.shortName} (${sortie.missileCount}× ${missileSpec.shortName})`,
+      });
       if (!firstVisibleProfile) {
         firstVisibleProfile = 'airstrike';
       }
@@ -1914,7 +1932,6 @@ export function TacticalMap({
       let best: PlacedLauncher | null = null;
       let bestDist = isMobileRef.current ? 36 : 26;
       for (const l of launchersRef.current) {
-        if (gameModeRef.current === 'ai' && l.isAi) continue;
         const lp = map.latLngToContainerPoint([l.lat, l.lng]);
         const d = Math.hypot(lp.x - pt.x, lp.y - pt.y);
         if (d < bestDist) {
@@ -1950,7 +1967,6 @@ export function TacticalMap({
       let best: PlacedAirfield | null = null;
       let bestDist = isMobileRef.current ? 38 : 28;
       for (const a of airfieldsRef.current) {
-        if (gameModeRef.current === 'ai' && a.isAi) continue;
         const ap = map.latLngToContainerPoint([a.lat, a.lng]);
         const d = Math.hypot(ap.x - pt.x, ap.y - pt.y);
         if (d < bestDist) {
@@ -2409,9 +2425,22 @@ export function TacticalMap({
 
         const hitB = findHitBuilding(pt);
         const hitP = !hitB ? findHitPvo(pt, true) : null;
+        const hitEnemyL = !hitB && !hitP ? findHitLauncher(pt) : null;
         const hitPPos = hitP ? getPvoLiveCoords(hitP) : null;
-        const targetLat = hitB ? hitB.lat : hitPPos ? hitPPos.lat : lat;
-        const targetLng = hitB ? hitB.lng : hitPPos ? hitPPos.lng : lng;
+        const targetLat = hitB
+          ? hitB.lat
+          : hitPPos
+            ? hitPPos.lat
+            : hitEnemyL?.isAi
+              ? hitEnemyL.lat
+              : lat;
+        const targetLng = hitB
+          ? hitB.lng
+          : hitPPos
+            ? hitPPos.lng
+            : hitEnemyL?.isAi
+              ? hitEnemyL.lng
+              : lng;
 
         if (plottingFlightRef.current) {
           const wps = flightWaypointsRef.current;
@@ -2580,9 +2609,22 @@ export function TacticalMap({
 
         const hitBuilding = findHitBuilding(pt);
         const hitPvo = !hitBuilding ? findHitPvo(pt, true) : null;
+        const hitEnemyLauncher = !hitBuilding && !hitPvo ? findHitLauncher(pt) : null;
         const hitPvoPos = hitPvo ? getPvoLiveCoords(hitPvo) : null;
-        const targetLat = hitBuilding ? hitBuilding.lat : hitPvoPos ? hitPvoPos.lat : lat;
-        const targetLng = hitBuilding ? hitBuilding.lng : hitPvoPos ? hitPvoPos.lng : lng;
+        const targetLat = hitBuilding
+          ? hitBuilding.lat
+          : hitPvoPos
+            ? hitPvoPos.lat
+            : hitEnemyLauncher?.isAi
+              ? hitEnemyLauncher.lat
+              : lat;
+        const targetLng = hitBuilding
+          ? hitBuilding.lng
+          : hitPvoPos
+            ? hitPvoPos.lng
+            : hitEnemyLauncher?.isAi
+              ? hitEnemyLauncher.lng
+              : lng;
 
         const mWps = airfieldMissileWaypointsRef.current;
         const prevPt = mWps.length > 0 ? mWps[mWps.length - 1] : curLaunchPt;
@@ -2641,9 +2683,22 @@ export function TacticalMap({
 
         const hitBuilding = findHitBuilding(pt);
         const hitPvo = !hitBuilding ? findHitPvo(pt, true) : null;
+        const hitEnemyLauncher = !hitBuilding && !hitPvo ? findHitLauncher(pt) : null;
         const hitPvoPos = hitPvo ? getPvoLiveCoords(hitPvo) : null;
-        const targetLat = hitBuilding ? hitBuilding.lat : hitPvoPos ? hitPvoPos.lat : lat;
-        const targetLng = hitBuilding ? hitBuilding.lng : hitPvoPos ? hitPvoPos.lng : lng;
+        const targetLat = hitBuilding
+          ? hitBuilding.lat
+          : hitPvoPos
+            ? hitPvoPos.lat
+            : hitEnemyLauncher?.isAi
+              ? hitEnemyLauncher.lat
+              : lat;
+        const targetLng = hitBuilding
+          ? hitBuilding.lng
+          : hitPvoPos
+            ? hitPvoPos.lng
+            : hitEnemyLauncher?.isAi
+              ? hitEnemyLauncher.lng
+              : lng;
 
         const distKm = haversineDistanceKm(launcher.lat, launcher.lng, targetLat, targetLng);
         if (distKm < 8) {
@@ -2892,6 +2947,7 @@ export function TacticalMap({
         expId: string,
         targetBuildingId?: string,
         targetPvoId?: string,
+        isAiStrike?: boolean,
       ) => {
         const expSpec = MUNITION_BY_ID[munitionId];
         const { particles, fireLobes, smokePuffs } = createExplosionParticles(power);
@@ -2915,31 +2971,41 @@ export function TacticalMap({
           targetPvoId || targetBuildingId
             ? []
             : launchersRef.current
-                .filter((l) => haversineDistanceKm(lat, lng, l.lat, l.lng) <= tightSplashKm)
+                .filter((l) => {
+                  if (gameModeRef.current === 'ai' && isAiStrike !== undefined) {
+                    if (isAiStrike && l.isAi) return false;
+                    if (!isAiStrike && !l.isAi) return false;
+                  }
+                  return haversineDistanceKm(lat, lng, l.lat, l.lng) <= tightSplashKm;
+                })
                 .map((l) => l.id);
 
         // Damage PVO units strictly when non-radar PVO is targeted or within a tight untargeted impact radius (radars are immune to strikes)
+        // Player UA strikes in AI mode never damage friendly UA PVO.
         const hitPvoIds = new Set<string>();
-        if (targetPvoId) {
-          for (const p of airDefensesRef.current) {
-            if (p.id !== targetPvoId) continue;
-            if (AIR_DEFENSE_BY_ID[p.airDefenseId].isRadar) continue;
-            const m = mobilePvoStateRef.current[p.id];
-            const pLat = m ? m.lat : p.lat;
-            const pLng = m ? m.lng : p.lng;
-            const dKm = haversineDistanceKm(lat, lng, pLat, pLng);
-            if (dKm <= Math.max(8, effectiveBlastKm)) {
-              hitPvoIds.add(p.id);
+        const canDamagePlayerPvo = !(gameModeRef.current === 'ai' && isAiStrike === false);
+        if (canDamagePlayerPvo) {
+          if (targetPvoId) {
+            for (const p of airDefensesRef.current) {
+              if (p.id !== targetPvoId) continue;
+              if (AIR_DEFENSE_BY_ID[p.airDefenseId].isRadar) continue;
+              const m = mobilePvoStateRef.current[p.id];
+              const pLat = m ? m.lat : p.lat;
+              const pLng = m ? m.lng : p.lng;
+              const dKm = haversineDistanceKm(lat, lng, pLat, pLng);
+              if (dKm <= Math.max(8, effectiveBlastKm)) {
+                hitPvoIds.add(p.id);
+              }
             }
-          }
-        } else if (!targetBuildingId) {
-          for (const p of airDefensesRef.current) {
-            if (AIR_DEFENSE_BY_ID[p.airDefenseId].isRadar) continue;
-            const m = mobilePvoStateRef.current[p.id];
-            const pLat = m ? m.lat : p.lat;
-            const pLng = m ? m.lng : p.lng;
-            if (haversineDistanceKm(lat, lng, pLat, pLng) <= tightSplashKm) {
-              hitPvoIds.add(p.id);
+          } else if (!targetBuildingId) {
+            for (const p of airDefensesRef.current) {
+              if (AIR_DEFENSE_BY_ID[p.airDefenseId].isRadar) continue;
+              const m = mobilePvoStateRef.current[p.id];
+              const pLat = m ? m.lat : p.lat;
+              const pLng = m ? m.lng : p.lng;
+              if (haversineDistanceKm(lat, lng, pLat, pLng) <= tightSplashKm) {
+                hitPvoIds.add(p.id);
+              }
             }
           }
         }
@@ -3008,17 +3074,26 @@ export function TacticalMap({
           }
         }
 
-        // Strict target isolation: PVO-targeted strikes NEVER damage nearby buildings; building-targeted hits ONLY that building; untargeted hits use tight radius
+        // Strict target isolation: PVO-targeted strikes NEVER damage nearby buildings;
+        // building-targeted hits ONLY that building; untargeted hits use tight radius.
+        // In AI mode, faction isolation ensures player strikes only hit AI targets and AI strikes only hit player targets.
+        const canStrikeDamageBuilding = (b: PlacedBuilding) => {
+          if (gameModeRef.current !== 'ai' || isAiStrike === undefined) return true;
+          return isAiStrike ? !b.isAi : Boolean(b.isAi);
+        };
         const hitBuildings = targetPvoId
           ? []
           : targetBuildingId
             ? buildingsRef.current.filter(
                 (b) =>
                   b.id === targetBuildingId &&
+                  canStrikeDamageBuilding(b) &&
                   haversineDistanceKm(lat, lng, b.lat, b.lng) <= Math.max(4, effectiveBlastKm),
               )
             : buildingsRef.current.filter(
-                (b) => haversineDistanceKm(lat, lng, b.lat, b.lng) <= tightSplashKm,
+                (b) =>
+                  canStrikeDamageBuilding(b) &&
+                  haversineDistanceKm(lat, lng, b.lat, b.lng) <= tightSplashKm,
               );
 
         const buildingUpdates: Array<{ id: string; hp: number }> = [];
@@ -3162,6 +3237,19 @@ export function TacticalMap({
               });
               totalLaunchesRef.current += 1;
               forceAlertUpdateRef.current = true;
+              if (q.isAiStrike) {
+                const destWp = launchWaypoints[launchWaypoints.length - 1];
+                const tgtB = q.targetBuildingId
+                  ? buildingsRef.current.find((b) => b.id === q.targetBuildingId)
+                  : undefined;
+                callbacksRef.current.onTacticalEvent({
+                  kind: 'launch',
+                  munitionId: q.munitionId,
+                  detail: tgtB
+                    ? `Пуск ИИ → ${BUILDING_BY_ID[tgtB.buildingId].shortName} (${Math.round(q.totalDistanceKm)} км)`
+                    : `Пуск ИИ → ${formatLocationLabel(destWp.lat, destWp.lng)} (${Math.round(q.totalDistanceKm)} км)`,
+                });
+              }
               if (qAltMode === 'normal') {
                 soundFx.playLaunch(spec.profile);
               }
@@ -3686,14 +3774,12 @@ export function TacticalMap({
 
             forceAlertUpdateRef.current = true;
             soundFx.playLaunch(missileSpec.profile);
-            if (!(flt.isAiStrike && gameModeRef.current === 'ai')) {
-              const finalWp = missileWaypoints[missileWaypoints.length - 1];
-              callbacksRef.current.onTacticalEvent({
-                kind: 'launch',
-                munitionId: missileId,
-                detail: `Пуск с ${carrier.shortName}: ${salvoCount}× ${missileSpec.shortName} (${Math.round(missileDistKm)} км → ${formatLocationLabel(finalWp.lat, finalWp.lng)})`,
-              });
-            }
+            const finalWp = missileWaypoints[missileWaypoints.length - 1];
+            callbacksRef.current.onTacticalEvent({
+              kind: 'launch',
+              munitionId: missileId,
+              detail: `Пуск с ${carrier.shortName}: ${salvoCount}× ${missileSpec.shortName} (${Math.round(missileDistKm)} км → ${formatLocationLabel(finalWp.lat, finalWp.lng)})`,
+            });
           }
 
           const homeAirfield = airfieldsRef.current.find((a) => a.id === flt.airfieldId);
@@ -3825,6 +3911,7 @@ export function TacticalMap({
               munitionId: flt.munitionId,
               targetBuildingId: flt.targetBuildingId,
               targetPvoId: flt.targetPvoId,
+              isAiStrike: flt.isAiStrike,
             });
             flt.bombsDroppedCount += 1;
             soundFx.playBombDrop();
@@ -3847,8 +3934,9 @@ export function TacticalMap({
             Boolean(flt.targetPvoId) &&
             !airDefensesRef.current.some((p) => p.id === flt.targetPvoId);
 
-          if ((bTargetGone || pTargetGone) && buildingsRef.current.length > 0) {
-            const sorted = buildingsRef.current
+          const playerAliveBuildings = buildingsRef.current.filter((b) => !b.isAi);
+          if ((bTargetGone || pTargetGone) && playerAliveBuildings.length > 0) {
+            const sorted = playerAliveBuildings
               .slice()
               .sort(
                 (a, b) =>
@@ -3886,7 +3974,7 @@ export function TacticalMap({
               ['shahed-136', 'shahed-238', 'banderol', 'kalibr', 'kh101', 'kh69'].includes(flt.munitionId) &&
               Math.random() < 0.45
             ) {
-              const altBuildings = buildingsRef.current.filter(
+              const altBuildings = playerAliveBuildings.filter(
                 (b) =>
                   b.id !== flt.targetBuildingId &&
                   haversineDistanceKm(flt.lat, flt.lng, b.lat, b.lng) <= 420,
@@ -4047,6 +4135,7 @@ export function TacticalMap({
               `exp_${flt.id}`,
               flt.targetBuildingId,
               flt.targetPvoId,
+              Boolean(flt.isAiStrike),
             );
           }
         } else {
@@ -4089,6 +4178,7 @@ export function TacticalMap({
             `exp_${bomb.id}`,
             bomb.targetBuildingId,
             bomb.targetPvoId,
+            bomb.isAiStrike,
           );
         } else {
           nextBombs.push(bomb);
@@ -4187,6 +4277,7 @@ export function TacticalMap({
         let bestDist = extendedRangeKm;
 
         for (const flt of flightsRef.current) {
+          if (gameModeRef.current === 'ai' && !flt.isAiStrike) continue;
           if (!isFlightDetected(flt)) continue;
           // ППО не может сбивать цель, которая ещё находится на территории РФ
           if (getTerritoryAt(flt.lat, flt.lng) === 'RU') continue;
@@ -5894,17 +5985,18 @@ export function TacticalMap({
           scale: bScale,
           hovered: isHov,
           isTargetLocked,
+          isAi: Boolean(b.isAi),
           timeSec,
         });
 
         if (isHov && !isTargetLocked) {
           ctx.save();
           ctx.font = '600 11px "Plus Jakarta Sans", sans-serif';
-          const tag = `${spec.name} · ${Math.ceil(b.hp)}/${b.maxHp} HP`;
+          const tag = `${b.isAi ? 'Цель · ' : ''}${spec.name} · ${Math.ceil(b.hp)}/${b.maxHp} HP`;
           const tw = ctx.measureText(tag).width;
           const labelY = pt.y - 22 * bScale - 20;
           ctx.fillStyle = 'rgba(7, 13, 23, 0.9)';
-          ctx.strokeStyle = spec.accentColor;
+          ctx.strokeStyle = b.isAi ? '#EF4444' : spec.accentColor;
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.roundRect(pt.x - tw / 2 - 7, labelY, tw + 14, 19, 4);
@@ -5916,9 +6008,8 @@ export function TacticalMap({
         }
       }
 
-      // 6. Render placed strike launchers (hide hidden enemy AI field launchers/ships in AI mode)
+      // 6. Render placed strike launchers (including visible enemy AI field launchers/ships in AI mode)
       for (const l of launchersRef.current) {
-        if (gameModeRef.current === 'ai' && l.isAi) continue;
         const pt = map.latLngToContainerPoint([l.lat, l.lng]);
         const spec = MUNITION_BY_ID[l.munitionId];
         const isSel = selectedRef.current === l.id;
@@ -5940,6 +6031,7 @@ export function TacticalMap({
           ammo: l.ammo,
           maxAmmo: l.maxAmmo,
           isNavalShip: l.isNavalShip,
+          isAi: Boolean(l.isAi),
           timeSec,
         });
 
@@ -5951,7 +6043,11 @@ export function TacticalMap({
             : `ПУ · ${spec.shortName}`;
           const tw = ctx.measureText(tag).width;
           ctx.fillStyle = 'rgba(7, 13, 23, 0.88)';
-          ctx.strokeStyle = isSel ? spec.accentColor : 'rgba(148, 163, 184, 0.4)';
+          ctx.strokeStyle = isSel
+            ? spec.accentColor
+            : l.isAi
+              ? 'rgba(239, 68, 68, 0.65)'
+              : 'rgba(148, 163, 184, 0.4)';
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.roundRect(pt.x - tw / 2 - 7, pt.y - 42, tw + 14, 19, 4);
@@ -5963,14 +6059,14 @@ export function TacticalMap({
         }
       }
 
-      // 6.5. Render placed airfields (hide AI armament/salvo details in AI defense mode)
+      // 6.5. Render placed airfields (all airfields visible, including AI armament details)
       for (const af of airfieldsRef.current) {
         const pt = map.latLngToContainerPoint([af.lat, af.lng]);
         const aircraftSpec = RUSSIAN_AIRCRAFT_BY_ID[af.selectedAircraftId];
         const missileSpec = MUNITION_BY_ID[aircraftSpec.missileId];
         const isAiBase = gameModeRef.current === 'ai' && Boolean(af.isAi);
         const isSel = !isAiBase && selectedAirfieldRef.current === af.id;
-        const isHov = !isAiBase && hoveredAirfieldIdRef.current === af.id;
+        const isHov = hoveredAirfieldIdRef.current === af.id;
         const salvo = Math.max(1, Math.min(aircraftSpec.missileCount, af.salvoCount || aircraftSpec.missileCount));
 
         drawAirfield(ctx, pt.x, pt.y, {
@@ -5983,7 +6079,7 @@ export function TacticalMap({
           faction: af.faction,
           selected: isSel,
           hovered: isHov,
-          hideArmament: isAiBase,
+          hideArmament: false,
           timeSec,
         });
 

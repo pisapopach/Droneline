@@ -71,11 +71,15 @@ import {
 } from './data/airfields';
 import {
   AI_FIRST_WAVE_PREP_SEC,
+  AI_LAUNCHER_KILL_BOUNTY,
   AI_STARTING_MONEY,
   INITIAL_AI_BUILDINGS,
+  INITIAL_AI_ENEMY_BUILDINGS,
   createInitialAiAirfields,
   createInitialAiBuildings,
+  createInitialEnemyAiBuildings,
   generateAiWaveOrders,
+  getAiBuildingBounty,
   type AiAirfieldSortieOrder,
   type AiWaveStrikeOrder,
   type AiWaveType,
@@ -87,6 +91,7 @@ import {
   BUILDINGS,
   MUNITION_BY_ID,
   MUNITIONS,
+  UA_AIRFIELD_AI_COST,
   type AirDefenseId,
   type AltitudeMode,
   type BuildingId,
@@ -94,6 +99,21 @@ import {
 } from './data/munitions';
 import { isPointInOccupiedTerritory } from './utils/frontline2026';
 import { getTerritoryAt } from './utils/geoBoundaries';
+import {
+  APP_LANG_OPTIONS,
+  formatSavedAtLabel,
+  formatSimClock,
+  formatSimDateShort,
+  formatSimTimeShort,
+  getAircraftLocalized,
+  getBuildingLocalized,
+  getMunitionLocalized,
+  getPvoLocalized,
+  getUiText,
+  loadAppLang,
+  saveAppLang,
+  type AppLang,
+} from './utils/i18n';
 import { soundFx } from './utils/soundFx';
 import {
   RUSSIA_TELEGRAM_CHANNELS,
@@ -108,7 +128,6 @@ import {
   clearSandboxSave,
   computeSandboxFingerprint,
   countSandboxUnits,
-  formatSavedAtLabel,
   loadSandboxState,
   saveSandboxState,
   type SandboxSaveData,
@@ -126,7 +145,6 @@ interface TacticalEventEntry extends TacticalEventPayload {
   simTimeMinutes: number;
 }
 
-const SIM_EPOCH_MS = Date.UTC(2026, 10, 23, 0, 0);
 const MANUAL_AIRFIELD_SQUADRONS: RussianAircraftId[][] = [
   ['mig31k', 'su57-x69'],
   ['tu95', 'tu160'],
@@ -147,52 +165,8 @@ function detectMobileViewport(): boolean {
   const coarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
   return w < 768 || (coarse && w < 960 && h < 1024);
 }
-const RU_MONTHS_SHORT = [
-  'янв',
-  'фев',
-  'мар',
-  'апр',
-  'мая',
-  'июн',
-  'июл',
-  'авг',
-  'сен',
-  'окт',
-  'ноя',
-  'дек',
-] as const;
 const INITIAL_SIM_MINUTES = 120; // 23 ноя 2026 · 02:00 (Д.1)
 const SIM_MINUTES_PER_REAL_SEC = 10; // 10 минут игровых = 1 секунда в реальной жизни
-
-function formatSimClock(totalMinutes: number): string {
-  const total = Math.floor(Math.max(0, totalMinutes));
-  const d = new Date(SIM_EPOCH_MS + total * 60_000);
-  const dayNum = Math.floor(total / 1440) + 1;
-  const dd = d.getUTCDate();
-  const mon = RU_MONTHS_SHORT[d.getUTCMonth()];
-  const yyyy = d.getUTCFullYear();
-  const hh = String(d.getUTCHours()).padStart(2, '0');
-  const mm = String(d.getUTCMinutes()).padStart(2, '0');
-  return `${dd} ${mon} ${yyyy} · ${hh}:${mm} (Д.${dayNum})`;
-}
-
-function formatSimDateShort(totalMinutes: number): string {
-  const total = Math.floor(Math.max(0, totalMinutes));
-  const d = new Date(SIM_EPOCH_MS + total * 60_000);
-  const dayNum = Math.floor(total / 1440) + 1;
-  const dd = d.getUTCDate();
-  const mon = RU_MONTHS_SHORT[d.getUTCMonth()];
-  const yyyy = d.getUTCFullYear();
-  return `${dd} ${mon} ${yyyy} · День ${dayNum}`;
-}
-
-function formatSimTimeShort(totalMinutes: number): string {
-  const total = Math.floor(Math.max(0, totalMinutes));
-  const minsInDay = total % 1440;
-  const hh = String(Math.floor(minsInDay / 60)).padStart(2, '0');
-  const mm = String(minsInDay % 60).padStart(2, '0');
-  return `${hh}:${mm}`;
-}
 
 function findLastTelegramPost(posts: TelegramPost[], oblast: string): TelegramPost | undefined {
   for (let i = posts.length - 1; i >= 0; i -= 1) {
@@ -216,9 +190,18 @@ const EMPTY_STATS: MapStats = {
 };
 
 export default function App() {
+  const [lang, setLang] = useState<AppLang>(() => loadAppLang());
+  const t = getUiText(lang);
+  const handleChangeLang = useCallback((nextLang: AppLang) => {
+    setLang(nextLang);
+    saveAppLang(nextLang);
+    soundFx.playUiClick('tap');
+  }, []);
+
   const [gameScreen, setGameScreen] = useState<GameScreen>('menu');
   const [menuStep, setMenuStep] = useState<'title' | 'modes'>('title');
   const [gameMode, setGameMode] = useState<GameMode>('sandbox');
+  const [aiOutcome, setAiOutcome] = useState<'defeat' | 'victory'>('defeat');
   const [savedSandbox, setSavedSandbox] = useState<SandboxSaveData | null>(() => loadSandboxState());
   const [sandboxExitPromptOpen, setSandboxExitPromptOpen] = useState<boolean>(false);
   const [restoreStatsTrigger, setRestoreStatsTrigger] = useState<{
@@ -316,10 +299,16 @@ export default function App() {
   const [warning, setWarning] = useState<string | null>(null);
   const warningTimerRef = useRef<number | null>(null);
 
+  const langRef = useRef(lang);
+  langRef.current = lang;
   const gameModeRef = useRef(gameMode);
   gameModeRef.current = gameMode;
   const moneyRef = useRef(money);
   moneyRef.current = money;
+  const launchersRef = useRef(launchers);
+  launchersRef.current = launchers;
+  const airfieldsRef = useRef(airfields);
+  airfieldsRef.current = airfields;
   const buildingsRef = useRef(buildings);
   buildingsRef.current = buildings;
   const airDefensesRef = useRef(airDefenses);
@@ -334,7 +323,8 @@ export default function App() {
   const lastKabDayRef = useRef(0);
   const lastMediumDayRef = useRef(0);
   const nextMassiveDayRef = useRef(6);
-  const aiHadBuildingsRef = useRef(false);
+  const aiHadPlayerBuildingsRef = useRef(false);
+  const aiHadEnemyBuildingsRef = useRef(false);
   const telegramOpenRef = useRef(telegramOpen);
   telegramOpenRef.current = telegramOpen;
   const selectedTelegramOblastRef = useRef(selectedTelegramOblast);
@@ -396,15 +386,16 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [gameScreen]);
 
-  // AI Mode Economy (+$/sec per surviving building), launcher deployment & Wave Director loop
+  // AI Mode Economy (+$/sec per surviving player building), launcher deployment & Wave Director loop
   useEffect(() => {
     if (gameScreen !== 'playing' || gameMode !== 'ai') return;
     const tickMs = 250;
     const id = window.setInterval(() => {
-      if (buildingsRef.current.length === 0) return;
+      const currentPlayerBuildings = buildingsRef.current.filter((b) => !b.isAi);
+      if (currentPlayerBuildings.length === 0) return;
       const now = Date.now();
       const simDt = (tickMs / 1000) * timeScaleRef.current;
-      const currentIncomePerSec = buildingsRef.current.reduce(
+      const currentIncomePerSec = currentPlayerBuildings.reduce(
         (sum, b) => sum + BUILDING_BY_ID[b.buildingId].incomePerSec,
         0,
       );
@@ -456,7 +447,7 @@ export default function App() {
           airfieldSorties,
           nextIntervalSec,
           spawnedKab,
-        } = generateAiWaveOrders(nextWave, buildingsRef.current, pvoSummary, {
+        } = generateAiWaveOrders(nextWave, currentPlayerBuildings, pvoSummary, {
           currentDay,
           waveType,
           forceDailyKab,
@@ -470,9 +461,21 @@ export default function App() {
         setAiWaveCountdownSec(nextIntervalSec);
 
         if (waveType === 'massive') {
-          showWarning('Внимание: фиксируется массированная ракетно-дроновая атака!');
+          showWarning(
+            langRef.current === 'uk'
+              ? 'Увага: зафіксовано масовану ракетно-дронову атаку!'
+              : langRef.current === 'en'
+                ? 'Warning: Massive missile & UAV strike detected!'
+                : 'Внимание: фиксируется массированная ракетно-дроновая атака!',
+          );
         } else if (waveType === 'medium_massive') {
-          showWarning('Внимание: комбинированный ракетно-дроновый удар противника!');
+          showWarning(
+            langRef.current === 'uk'
+              ? 'Увага: комбінований ракетно-дроновий удар ворога!'
+              : langRef.current === 'en'
+                ? 'Warning: Combined enemy missile & UAV strike incoming!'
+                : 'Внимание: комбинированный ракетно-дроновый удар противника!',
+          );
         }
 
         if (waveLaunchers.length > 0) {
@@ -503,22 +506,38 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [gameScreen, gameMode, showWarning]);
 
-  // Track AI mode Game Over when all defended buildings are destroyed
+  // Track AI mode Defeat / Victory when all friendly or all enemy buildings are destroyed
   useEffect(() => {
     if (gameScreen !== 'playing' || gameMode !== 'ai') return;
-    if (buildings.length > 0) {
-      aiHadBuildingsRef.current = true;
-    } else if (aiHadBuildingsRef.current) {
+    const alivePlayer = buildings.filter((b) => !b.isAi).length;
+    const aliveEnemy = buildings.filter((b) => Boolean(b.isAi)).length;
+    if (alivePlayer > 0) {
+      aiHadPlayerBuildingsRef.current = true;
+    }
+    if (aliveEnemy > 0) {
+      aiHadEnemyBuildingsRef.current = true;
+    }
+    if (aiHadPlayerBuildingsRef.current && alivePlayer === 0) {
       setPendingPlacement(null);
       setSelectedFlight(null);
       setIsPlottingFlightRoute(false);
       setFlightRouteWaypoints([]);
+      setAiOutcome('defeat');
+      setGameScreen('gameover');
+    } else if (aiHadEnemyBuildingsRef.current && aliveEnemy === 0) {
+      setPendingPlacement(null);
+      setSelectedFlight(null);
+      setIsPlottingFlightRoute(false);
+      setFlightRouteWaypoints([]);
+      setAiOutcome('victory');
       setGameScreen('gameover');
     }
-  }, [gameScreen, gameMode, buildings.length]);
+  }, [gameScreen, gameMode, buildings]);
 
   const handleStartGame = (mode: GameMode) => {
-    aiHadBuildingsRef.current = false;
+    aiHadPlayerBuildingsRef.current = false;
+    aiHadEnemyBuildingsRef.current = false;
+    setAiOutcome('defeat');
     lastSavedFingerprintRef.current = null;
     setSandboxExitPromptOpen(false);
     setLaunchers([]);
@@ -557,9 +576,11 @@ export default function App() {
 
     if (mode === 'ai') {
       const initialBuildings = createInitialAiBuildings();
+      const initialEnemyBuildings = createInitialEnemyAiBuildings();
       const initialAiAirfields = createInitialAiAirfields();
-      aiHadBuildingsRef.current = initialBuildings.length > 0;
-      setBuildings(initialBuildings);
+      aiHadPlayerBuildingsRef.current = initialBuildings.length > 0;
+      aiHadEnemyBuildingsRef.current = initialEnemyBuildings.length > 0;
+      setBuildings([...initialBuildings, ...initialEnemyBuildings]);
       setAirfields(initialAiAirfields);
       setMoney(AI_STARTING_MONEY);
       aiWaveNumberRef.current = 0;
@@ -586,7 +607,9 @@ export default function App() {
   };
 
   const handleReturnToMenu = () => {
-    aiHadBuildingsRef.current = false;
+    aiHadPlayerBuildingsRef.current = false;
+    aiHadEnemyBuildingsRef.current = false;
+    setAiOutcome('defeat');
     lastSavedFingerprintRef.current = null;
     setSandboxExitPromptOpen(false);
     setLaunchers([]);
@@ -628,18 +651,25 @@ export default function App() {
   const handleSaveCurrentSandbox = (options?: { silent?: boolean }): boolean => {
     const cleanLaunchers = launchers.filter((l) => !l.isAi);
     const cleanAirfields = airfields.filter((a) => !a.isAi);
+    const cleanBuildings = buildings.filter((b) => !b.isAi);
     const totalUnits = countSandboxUnits({
       launchers: cleanLaunchers,
       airfields: cleanAirfields,
       airDefenses,
-      buildings,
+      buildings: cleanBuildings,
     });
     if (totalUnits === 0) {
       clearSandboxSave();
       setSavedSandbox(null);
       lastSavedFingerprintRef.current = null;
       if (!options?.silent) {
-        showWarning('На карте нет объектов для сохранения');
+        showWarning(
+          lang === 'uk'
+            ? 'На мапі немає об’єктів для збереження'
+            : lang === 'en'
+              ? 'No objects on map to save'
+              : 'На карте нет объектов для сохранения',
+        );
       }
       return false;
     }
@@ -656,7 +686,7 @@ export default function App() {
       launchers: cleanLaunchers,
       airfields: cleanAirfields,
       airDefenses,
-      buildings,
+      buildings: cleanBuildings,
       stats: {
         totalLaunches: stats.totalLaunches,
         explosions: stats.explosions,
@@ -669,7 +699,13 @@ export default function App() {
     const savedOk = saveSandboxState(payload);
     if (!savedOk) {
       if (!options?.silent) {
-        showWarning('Не удалось сохранить расстановку в память браузера');
+        showWarning(
+          lang === 'uk'
+            ? 'Не вдалося зберегти розстановку в пам’ять браузера'
+            : lang === 'en'
+              ? 'Failed to save layout to browser storage'
+              : 'Не удалось сохранить расстановку в память браузера',
+        );
       }
       return false;
     }
@@ -678,12 +714,18 @@ export default function App() {
       launchers: cleanLaunchers,
       airfields: cleanAirfields,
       airDefenses,
-      buildings,
+      buildings: cleanBuildings,
       buildingScale,
     });
     if (!options?.silent) {
       soundFx.playUiClick('confirm');
-      showWarning('Расстановка песочницы сохранена');
+      showWarning(
+        lang === 'uk'
+          ? 'Розстановку пісочниці збережено'
+          : lang === 'en'
+            ? 'Sandbox layout saved'
+            : 'Расстановка песочницы сохранена',
+      );
     }
     return true;
   };
@@ -717,7 +759,9 @@ export default function App() {
       handleStartGame('sandbox');
       return;
     }
-    aiHadBuildingsRef.current = false;
+    aiHadPlayerBuildingsRef.current = false;
+    aiHadEnemyBuildingsRef.current = false;
+    setAiOutcome('defeat');
     setSandboxExitPromptOpen(false);
     setPendingPlacement(null);
     setSelectedLauncherId(null);
@@ -906,6 +950,26 @@ export default function App() {
   };
 
   const handleSelectStrikeCatalog = (id: MunitionId) => {
+    const spec = MUNITION_BY_ID[id];
+    const isAlreadyPending = pendingPlacement?.kind === 'strike' && pendingPlacement.id === id;
+    if (gameMode === 'ai') {
+      if (spec.faction !== 'UA' || spec.airLaunchedOnly) {
+        soundFx.playBlocked();
+        return;
+      }
+      const strikeCost = spec.cost ?? 0;
+      if (!isAlreadyPending && strikeCost > 0 && money < strikeCost) {
+        soundFx.playBlocked();
+        showWarning(
+          lang === 'uk'
+            ? `Недостатньо коштів: потрібно $${strikeCost} (доступно $${Math.floor(money)})`
+            : lang === 'en'
+              ? `Insufficient funds: need $${strikeCost} ($${Math.floor(money)} available)`
+              : `Недостаточно средств: нужно $${strikeCost} (доступно $${Math.floor(money)})`,
+        );
+        return;
+      }
+    }
     clearSelectionModes();
     setPendingPlacement((prev) =>
       prev?.kind === 'strike' && prev.id === id ? null : { kind: 'strike', id },
@@ -921,7 +985,13 @@ export default function App() {
     const isAlreadyPending = pendingPlacement?.kind === 'pvo' && pendingPlacement.id === id;
     if (!isAlreadyPending && gameMode === 'ai' && money < spec.cost) {
       soundFx.playBlocked();
-      showWarning(`Недостаточно средств: нужно $${spec.cost} (доступно $${Math.floor(money)})`);
+      showWarning(
+        lang === 'uk'
+          ? `Недостатньо коштів: потрібно $${spec.cost} (доступно $${Math.floor(money)})`
+          : lang === 'en'
+            ? `Insufficient funds: need $${spec.cost} ($${Math.floor(money)} available)`
+            : `Недостаточно средств: нужно $${spec.cost} (доступно $${Math.floor(money)})`,
+      );
       return;
     }
     clearSelectionModes();
@@ -955,6 +1025,18 @@ export default function App() {
   };
 
   const handleStartManualUaAirfieldPlacement = () => {
+    const isAlreadyPending = pendingPlacement?.kind === 'airfield-ua';
+    if (!isAlreadyPending && gameMode === 'ai' && money < UA_AIRFIELD_AI_COST) {
+      soundFx.playBlocked();
+      showWarning(
+        lang === 'uk'
+          ? `Для розгортання аеродрому ЗСУ потрібно $${UA_AIRFIELD_AI_COST}`
+          : lang === 'en'
+            ? `Need $${UA_AIRFIELD_AI_COST} to deploy a UA airbase`
+            : `Для развёртывания аэродрома ВСУ нужно $${UA_AIRFIELD_AI_COST}`,
+      );
+      return;
+    }
     clearSelectionModes();
     setPendingPlacement((prev) => (prev?.kind === 'airfield-ua' ? null : { kind: 'airfield-ua' }));
     soundFx.playUiClick('tap');
@@ -1003,6 +1085,25 @@ export default function App() {
       return;
     }
 
+    if (gameMode === 'ai') {
+      if (preset.faction !== 'UA') {
+        soundFx.playBlocked();
+        return;
+      }
+      if (money < UA_AIRFIELD_AI_COST) {
+        soundFx.playBlocked();
+        showWarning(
+          lang === 'uk'
+            ? `Для розгортання аеродрому ЗСУ потрібно $${UA_AIRFIELD_AI_COST}`
+            : lang === 'en'
+              ? `Need $${UA_AIRFIELD_AI_COST} to deploy a UA airbase`
+              : `Для развёртывания аэродрома ВСУ нужно $${UA_AIRFIELD_AI_COST}`,
+        );
+        return;
+      }
+      setMoney((prev) => Math.max(0, prev - UA_AIRFIELD_AI_COST));
+    }
+
     const defaultSpec = RUSSIAN_AIRCRAFT_BY_ID[preset.defaultAircraftId];
     const newAirfield: PlacedAirfield = {
       id: `af_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1023,40 +1124,61 @@ export default function App() {
     }
   };
 
-  const handlePlaceAirfield = useCallback((lat: number, lng: number, faction: 'RU' | 'UA' = 'RU') => {
-    const id = `af_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    setAirfields((prev) => {
-      const isUa = faction === 'UA';
-      const sameFactionCount = prev.filter((a) => (a.faction ?? 'RU') === faction).length;
-      const squadrons = isUa ? MANUAL_UA_AIRFIELD_SQUADRONS : MANUAL_AIRFIELD_SQUADRONS;
-      const roster = squadrons[sameFactionCount % squadrons.length];
-      const defaultAircraftId = roster[0];
-      const defaultSpec = RUSSIAN_AIRCRAFT_BY_ID[defaultAircraftId];
-      return [
-        ...prev,
-        {
-          id,
-          name: isUa ? `Аэродром ВСУ #${sameFactionCount + 1}` : `Аэродром #${sameFactionCount + 1}`,
-          faction,
-          lat,
-          lng,
-          selectedAircraftId: defaultAircraftId,
-          availableAircraftIds: roster,
-          salvoCount: defaultSpec.missileCount,
-        },
-      ];
-    });
-    setPendingPlacement(null);
-    setSelectedLauncherId(null);
-    setSelectedFlight(null);
-    setIsPlottingFlightRoute(false);
-    setFlightRouteWaypoints([]);
-    setSu57DropPoint(null);
-    setAirfieldLaunchPoint(null);
-    setAirfieldMissileWaypoints([]);
-    setSelectedAirfieldId(null);
-    setAirfieldModalStep(null);
-  }, []);
+  const handlePlaceAirfield = useCallback(
+    (lat: number, lng: number, faction: 'RU' | 'UA' = 'RU') => {
+      if (gameModeRef.current === 'ai' && faction === 'UA') {
+        if (moneyRef.current < UA_AIRFIELD_AI_COST) {
+          soundFx.playBlocked();
+          showWarning(
+            langRef.current === 'uk'
+              ? `Для розгортання аеродрому ЗСУ потрібно $${UA_AIRFIELD_AI_COST}`
+              : langRef.current === 'en'
+                ? `Need $${UA_AIRFIELD_AI_COST} to deploy a UA airbase`
+                : `Для развёртывания аэродрома ВСУ нужно $${UA_AIRFIELD_AI_COST}`,
+          );
+          setPendingPlacement(null);
+          return;
+        }
+        setMoney((prev) => Math.max(0, prev - UA_AIRFIELD_AI_COST));
+      }
+      const id = `af_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      setAirfields((prev) => {
+        const isUa = faction === 'UA';
+        const sameFactionCount = prev.filter((a) => (a.faction ?? 'RU') === faction).length;
+        const squadrons = isUa ? MANUAL_UA_AIRFIELD_SQUADRONS : MANUAL_AIRFIELD_SQUADRONS;
+        const roster = squadrons[sameFactionCount % squadrons.length];
+        const defaultAircraftId = roster[0];
+        const defaultSpec = RUSSIAN_AIRCRAFT_BY_ID[defaultAircraftId];
+        const curText = getUiText(langRef.current);
+        return [
+          ...prev,
+          {
+            id,
+            name: isUa
+              ? `${curText.airfieldBasePrefixUa} #${sameFactionCount + 1}`
+              : `${curText.airfieldBasePrefixRu} #${sameFactionCount + 1}`,
+            faction,
+            lat,
+            lng,
+            selectedAircraftId: defaultAircraftId,
+            availableAircraftIds: roster,
+            salvoCount: defaultSpec.missileCount,
+          },
+        ];
+      });
+      setPendingPlacement(null);
+      setSelectedLauncherId(null);
+      setSelectedFlight(null);
+      setIsPlottingFlightRoute(false);
+      setFlightRouteWaypoints([]);
+      setSu57DropPoint(null);
+      setAirfieldLaunchPoint(null);
+      setAirfieldMissileWaypoints([]);
+      setSelectedAirfieldId(null);
+      setAirfieldModalStep(null);
+    },
+    [showWarning],
+  );
 
   const handleSelectAirfield = useCallback((id: string | null) => {
     setPendingPlacement(null);
@@ -1148,6 +1270,11 @@ export default function App() {
   };
 
   const handleRemoveAirfield = (id: string) => {
+    const target = airfieldsRef.current.find((a) => a.id === id && !a.isAi);
+    if (target && gameModeRef.current === 'ai' && target.faction === 'UA') {
+      const refund = Math.round(UA_AIRFIELD_AI_COST * 0.5);
+      setMoney((prev) => prev + refund);
+    }
     setAirfields((prev) => prev.filter((a) => !(a.id === id && !a.isAi)));
     if (selectedAirfieldId === id) {
       setSelectedAirfieldId(null);
@@ -1157,22 +1284,43 @@ export default function App() {
     }
   };
 
-  const handlePlaceStrikeLauncher = useCallback((munitionId: MunitionId, lat: number, lng: number) => {
-    const spec = MUNITION_BY_ID[munitionId];
-    const newLauncher: PlacedLauncher = {
-      id: `lnch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      munitionId,
-      lat,
-      lng,
-      ammo: spec.maxAmmo,
-      maxAmmo: spec.maxAmmo,
-      lastLaunchAt: 0,
-      headingDeg: 45,
-    };
-    setLaunchers((prev) => [...prev, newLauncher]);
-    setPendingPlacement(null);
-    setSelectedLauncherId(null);
-  }, []);
+  const handlePlaceStrikeLauncher = useCallback(
+    (munitionId: MunitionId, lat: number, lng: number) => {
+      const spec = MUNITION_BY_ID[munitionId];
+      if (gameModeRef.current === 'ai') {
+        const strikeCost = spec.cost ?? 0;
+        if (strikeCost > 0 && moneyRef.current < strikeCost) {
+          soundFx.playBlocked();
+          showWarning(
+            langRef.current === 'uk'
+              ? `Недостатньо коштів: потрібно $${strikeCost}`
+              : langRef.current === 'en'
+                ? `Insufficient funds: need $${strikeCost}`
+                : `Недостаточно средств: нужно $${strikeCost}`,
+          );
+          setPendingPlacement(null);
+          return;
+        }
+        if (strikeCost > 0) {
+          setMoney((prev) => Math.max(0, prev - strikeCost));
+        }
+      }
+      const newLauncher: PlacedLauncher = {
+        id: `lnch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        munitionId,
+        lat,
+        lng,
+        ammo: spec.maxAmmo,
+        maxAmmo: spec.maxAmmo,
+        lastLaunchAt: 0,
+        headingDeg: 45,
+      };
+      setLaunchers((prev) => [...prev, newLauncher]);
+      setPendingPlacement(null);
+      setSelectedLauncherId(null);
+    },
+    [showWarning],
+  );
 
   const handlePlaceAirDefense = useCallback(
     (airDefenseId: AirDefenseId, lat: number, lng: number) => {
@@ -1180,7 +1328,13 @@ export default function App() {
       if (gameModeRef.current === 'ai') {
         if (moneyRef.current < spec.cost) {
           soundFx.playBlocked();
-          showWarning(`Недостаточно средств: нужно $${spec.cost}`);
+          showWarning(
+            langRef.current === 'uk'
+              ? `Недостатньо коштів: потрібно $${spec.cost}`
+              : langRef.current === 'en'
+                ? `Insufficient funds: need $${spec.cost}`
+                : `Недостаточно средств: нужно $${spec.cost}`,
+          );
           setPendingPlacement(null);
           return;
         }
@@ -1262,15 +1416,53 @@ export default function App() {
     setRouteLaunchCount(1);
   }, []);
 
-  const handleRemoveLauncher = (id: string) => {
-    setLaunchers((prev) => prev.filter((l) => !(l.id === id && !l.isAi)));
-    if (selectedLauncherId === id) {
-      setSelectedLauncherId(null);
-      setIsPlottingRoute(false);
-      setRouteWaypoints([]);
-      setRouteLaunchCount(1);
+  const handleRemoveLauncher = useCallback((id: string) => {
+    const target = launchersRef.current.find((l) => l.id === id && !l.isAi);
+    if (target && gameModeRef.current === 'ai') {
+      const cost = MUNITION_BY_ID[target.munitionId].cost ?? 0;
+      if (cost > 0) {
+        setMoney((prev) => prev + Math.round(cost * 0.5));
+      }
     }
-  };
+    setLaunchers((prev) => prev.filter((l) => !(l.id === id && !l.isAi)));
+    setSelectedLauncherId((prev) => {
+      if (prev === id) {
+        setIsPlottingRoute(false);
+        setRouteWaypoints([]);
+        setRouteLaunchCount(1);
+        return null;
+      }
+      return prev;
+    });
+  }, []);
+
+  const handleReloadLauncher = useCallback(
+    (id: string) => {
+      const target = launchersRef.current.find((l) => l.id === id && !l.isAi);
+      if (!target || target.ammo >= target.maxAmmo) return;
+      const spec = MUNITION_BY_ID[target.munitionId];
+      const reloadCost = Math.round((spec.cost ?? 150) * 0.35);
+      if (gameModeRef.current === 'ai') {
+        if (moneyRef.current < reloadCost) {
+          soundFx.playBlocked();
+          showWarning(
+            langRef.current === 'uk'
+              ? `Для поповнення Б/К потрібно $${reloadCost}`
+              : langRef.current === 'en'
+                ? `Need $${reloadCost} to reload launcher`
+                : `Для пополнения Б/К нужно $${reloadCost}`,
+          );
+          return;
+        }
+        setMoney((prev) => Math.max(0, prev - reloadCost));
+      }
+      setLaunchers((prev) =>
+        prev.map((l) => (l.id === id ? { ...l, ammo: l.maxAmmo } : l)),
+      );
+      soundFx.playPlaceLauncher();
+    },
+    [showWarning],
+  );
 
   const handleRemovePvo = useCallback((id: string) => {
     const target = airDefensesRef.current.find((p) => p.id === id);
@@ -1291,7 +1483,13 @@ export default function App() {
       if (gameModeRef.current === 'ai') {
         if (moneyRef.current < reloadCost) {
           soundFx.playBlocked();
-          showWarning(`Для пополнения Б/К нужно $${reloadCost}`);
+          showWarning(
+            langRef.current === 'uk'
+              ? `Для поповнення Б/К потрібно $${reloadCost}`
+              : langRef.current === 'en'
+                ? `Need $${reloadCost} to reload`
+                : `Для пополнения Б/К нужно $${reloadCost}`,
+          );
           return;
         }
         setMoney((prev) => Math.max(0, prev - reloadCost));
@@ -1314,7 +1512,13 @@ export default function App() {
       if (gameModeRef.current === 'ai') {
         if (moneyRef.current < repairCost) {
           soundFx.playBlocked();
-          showWarning(`Для ремонта ППО нужно $${repairCost}`);
+          showWarning(
+            langRef.current === 'uk'
+              ? `Для ремонту ППО потрібно $${repairCost}`
+              : langRef.current === 'en'
+                ? `Need $${repairCost} to repair`
+                : `Для ремонта ППО нужно $${repairCost}`,
+          );
           return;
         }
         setMoney((prev) => Math.max(0, prev - repairCost));
@@ -1335,6 +1539,14 @@ export default function App() {
   const handleUnitsDestroyed = useCallback((launcherIds: string[], pvoIds: string[]) => {
     if (launcherIds.length > 0) {
       const removed = new Set(launcherIds);
+      if (gameModeRef.current === 'ai') {
+        const enemyKills = launchersRef.current.filter(
+          (l) => removed.has(l.id) && Boolean(l.isAi),
+        ).length;
+        if (enemyKills > 0) {
+          setMoney((prev) => prev + enemyKills * AI_LAUNCHER_KILL_BOUNTY);
+        }
+      }
       setLaunchers((prev) => prev.filter((l) => !removed.has(l.id)));
       setSelectedLauncherId((prevSelected) => {
         if (prevSelected && removed.has(prevSelected)) {
@@ -1371,6 +1583,19 @@ export default function App() {
     (updates: Array<{ id: string; hp: number }>) => {
       if (updates.length === 0) return;
       const updateMap = new Map(updates.map((u) => [u.id, u.hp]));
+      if (gameModeRef.current === 'ai') {
+        let totalBounty = 0;
+        for (const b of buildingsRef.current) {
+          if (!b.isAi || b.hp <= 0) continue;
+          const nextHp = updateMap.get(b.id);
+          if (nextHp !== undefined && nextHp <= 0) {
+            totalBounty += getAiBuildingBounty(b.buildingId);
+          }
+        }
+        if (totalBounty > 0) {
+          setMoney((prev) => prev + totalBounty);
+        }
+      }
       setBuildings((prev) =>
         prev
           .map((b) => {
@@ -1485,11 +1710,11 @@ export default function App() {
   };
 
   const pendingStrikeSpec =
-    pendingPlacement?.kind === 'strike' ? MUNITION_BY_ID[pendingPlacement.id] : null;
+    pendingPlacement?.kind === 'strike' ? getMunitionLocalized(pendingPlacement.id, lang) : null;
   const pendingPvoSpec =
-    pendingPlacement?.kind === 'pvo' ? AIR_DEFENSE_BY_ID[pendingPlacement.id] : null;
+    pendingPlacement?.kind === 'pvo' ? getPvoLocalized(pendingPlacement.id, lang) : null;
   const pendingInfraSpec =
-    pendingPlacement?.kind === 'infra' ? BUILDING_BY_ID[pendingPlacement.id] : null;
+    pendingPlacement?.kind === 'infra' ? getBuildingLocalized(pendingPlacement.id, lang) : null;
   const pendingAirfield = pendingPlacement?.kind === 'airfield';
   const pendingAirfieldUa = pendingPlacement?.kind === 'airfield-ua';
   const pendingShip = pendingPlacement?.kind === 'ship';
@@ -1497,31 +1722,36 @@ export default function App() {
   const selectedLauncher = selectedLauncherId
     ? launchers.find((l) => l.id === selectedLauncherId) ?? null
     : null;
-  const selectedSpec = selectedLauncher ? MUNITION_BY_ID[selectedLauncher.munitionId] : null;
+  const selectedSpec = selectedLauncher
+    ? getMunitionLocalized(selectedLauncher.munitionId, lang)
+    : null;
   const selectedAirfield = selectedAirfieldId
     ? airfields.find((a) => a.id === selectedAirfieldId) ?? null
     : null;
   const selectedAircraftSpec = selectedAirfield
-    ? RUSSIAN_AIRCRAFT_BY_ID[selectedAirfield.selectedAircraftId]
+    ? getAircraftLocalized(selectedAirfield.selectedAircraftId, lang)
     : null;
   const selectedAircraftMissileSpec = selectedAircraftSpec
-    ? MUNITION_BY_ID[selectedAircraftSpec.missileId]
+    ? getMunitionLocalized(selectedAircraftSpec.missileId, lang)
     : null;
   const effectiveRouteLaunchCount = selectedLauncher
     ? Math.max(1, Math.min(routeLaunchCount, Math.max(1, selectedLauncher.ammo)))
     : 1;
-  const aiIncomePerSec =
-    gameMode === 'ai'
-      ? buildings.reduce((sum, b) => sum + BUILDING_BY_ID[b.buildingId].incomePerSec, 0)
-      : 0;
-
   const playerAirfields = airfields.filter((a) => !a.isAi);
   const playerLaunchers = launchers.filter((l) => !l.isAi);
-  const playerUnitsCount =
-    playerLaunchers.length + playerAirfields.length + airDefenses.length + buildings.length;
+  const playerBuildings = buildings.filter((b) => !b.isAi);
+  const aiEnemyBuildings = buildings.filter((b) => Boolean(b.isAi));
 
-  const totalBuildingsMaxHp = buildings.reduce((sum, b) => sum + b.maxHp, 0);
-  const totalBuildingsHp = buildings.reduce((sum, b) => sum + Math.max(0, b.hp), 0);
+  const aiIncomePerSec =
+    gameMode === 'ai'
+      ? playerBuildings.reduce((sum, b) => sum + BUILDING_BY_ID[b.buildingId].incomePerSec, 0)
+      : 0;
+
+  const playerUnitsCount =
+    playerLaunchers.length + playerAirfields.length + airDefenses.length + playerBuildings.length;
+
+  const totalBuildingsMaxHp = playerBuildings.reduce((sum, b) => sum + b.maxHp, 0);
+  const totalBuildingsHp = playerBuildings.reduce((sum, b) => sum + Math.max(0, b.hp), 0);
   const buildingsIntegrityPct =
     totalBuildingsMaxHp > 0 ? Math.round((totalBuildingsHp / totalBuildingsMaxHp) * 100) : 0;
 
@@ -1633,6 +1863,28 @@ export default function App() {
           <line x1="220" y1="450" x2="1220" y2="450" stroke="#4D5B45" strokeWidth="0.7" strokeOpacity="0.3" />
         </svg>
 
+        {/* Top-right Language Switcher in Menu */}
+        <div
+          className="absolute top-4 right-4 z-20 flex items-center border border-[#343E2F] bg-[#161B14]/95 divide-x divide-[#2D3629] shadow-lg"
+          role="group"
+          aria-label={t.languageLabel}
+        >
+          {APP_LANG_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => handleChangeLang(opt.id)}
+              className={`px-2.5 py-1.5 text-[11px] font-mono-tabular font-bold transition-colors cursor-pointer ${
+                lang === opt.id
+                  ? 'bg-[#DF9A2B] text-[#111410]'
+                  : 'text-[#A3AE9C] hover:text-[#F4EFE4] hover:bg-[#1E251B]'
+              }`}
+            >
+              {opt.short}
+            </button>
+          ))}
+        </div>
+
         {menuStep === 'title' ? (
           <div className="relative z-10 flex w-full max-w-lg flex-col items-center border border-[#343E2F] bg-[#161B14]/95 px-8 py-11 text-center shadow-2xl">
             {/* Corner Cartographic Framing Brackets */}
@@ -1656,10 +1908,10 @@ export default function App() {
               className="font-display text-4xl sm:text-5xl font-bold uppercase tracking-wide text-[#F4EFE4]"
               style={{ textWrap: 'balance' }}
             >
-              Оперативный штаб ПВО
+              {t.appName}
             </h1>
             <p className="mt-3 max-w-md text-sm leading-relaxed text-[#A3AE9C]">
-              Тактический симулятор противовоздушной обороны, пусков БПЛА, крылатых и баллистических ракет
+              {t.tagline}
             </p>
 
             <button
@@ -1671,15 +1923,15 @@ export default function App() {
               className="mt-8 w-full max-w-[270px] flex items-center justify-center gap-2.5 bg-[#DF9A2B] hover:bg-[#EDA938] text-[#111410] font-bold text-base tracking-wide px-8 py-3.5 shadow-[0_3px_0_#915F12] active:translate-y-[1px] transition-all cursor-pointer whitespace-nowrap shrink-0"
             >
               <Play className="h-4 w-4 fill-current shrink-0" />
-              <span>Играть</span>
+              <span>{t.playBtn}</span>
             </button>
 
             <div className="mt-8 flex flex-wrap items-center justify-center gap-2.5 text-xs text-[#889481]">
-              <span>Системы ППО и РЛС</span>
+              <span>{t.featurePvo}</span>
               <span aria-hidden="true">·</span>
-              <span>Авиация и ракеты</span>
+              <span>{t.featureAir}</span>
               <span aria-hidden="true">·</span>
-              <span>Ручное управление</span>
+              <span>{t.featureManual}</span>
             </div>
           </div>
         ) : (
@@ -1698,17 +1950,17 @@ export default function App() {
                     soundFx.playUiClick('back');
                     setMenuStep('title');
                   }}
-                  aria-label="Назад"
+                  aria-label={t.back}
                   className="flex h-9 w-9 items-center justify-center border border-[#3B4735] bg-[#1E251B] hover:border-[#DF9A2B] text-[#E6E2D6] transition-colors shrink-0 cursor-pointer"
                 >
                   <ArrowLeft className="h-4 w-4" />
                 </button>
                 <div className="min-w-0">
                   <h1 className="font-display text-2xl font-bold uppercase tracking-wide text-[#F4EFE4] truncate">
-                    Выбор режима
+                    {t.chooseMode}
                   </h1>
                   <p className="text-xs text-[#9AA593] truncate">
-                    Выберите формат тактической операции на карте
+                    {t.chooseModeSub}
                   </p>
                 </div>
               </div>
@@ -1726,30 +1978,30 @@ export default function App() {
                       <circle cx="40" cy="12" r="2.2" fill="#ECE8DD" />
                     </svg>
                     <span className="text-[11px] font-mono-tabular text-[#6CA69C] whitespace-nowrap shrink-0">
-                      Сохр. {formatSavedAtLabel(savedSandbox.savedAt)}
+                      {t.sandboxSavedPrefix} {formatSavedAtLabel(savedSandbox.savedAt, lang)}
                     </span>
                   </div>
 
                   <h2 className="font-display text-2xl font-bold uppercase tracking-wide text-[#F4EFE4]">
-                    Песочница
+                    {t.sandboxTitle}
                   </h2>
 
                   <p className="mt-1.5 text-xs leading-relaxed text-[#A5B09F]">
-                    Найдена сохранённая расстановка на карте. Можно продолжить с неё или начать заново.
+                    {t.sandboxSavedDesc}
                   </p>
 
                   <div className="mt-3 w-full grid grid-cols-2 gap-x-3 gap-y-1 border border-[#2C362E] bg-[#131914] px-3 py-2 text-[11px] font-mono-tabular text-[#C9D6CE]">
                     <span>
-                      ПУ: <strong className="text-[#F4EFE4]">{savedSandbox.launchers.length}</strong>
+                      {t.launchersShort}: <strong className="text-[#F4EFE4]">{savedSandbox.launchers.length}</strong>
                     </span>
                     <span>
-                      ППО: <strong className="text-[#6CA69C]">{savedSandbox.airDefenses.length}</strong>
+                      {t.pvoShort}: <strong className="text-[#6CA69C]">{savedSandbox.airDefenses.length}</strong>
                     </span>
                     <span>
-                      Объекты: <strong className="text-[#F4EFE4]">{savedSandbox.buildings.length}</strong>
+                      {t.objectsShort}: <strong className="text-[#F4EFE4]">{savedSandbox.buildings.length}</strong>
                     </span>
                     <span>
-                      Аэродромы: <strong className="text-[#F4EFE4]">{savedSandbox.airfields.length}</strong>
+                      {t.airfieldsShort}: <strong className="text-[#F4EFE4]">{savedSandbox.airfields.length}</strong>
                     </span>
                   </div>
 
@@ -1759,7 +2011,7 @@ export default function App() {
                       onClick={handleResumeSavedSandbox}
                       className="w-full flex items-center justify-center gap-1.5 bg-[#6CA69C] hover:bg-[#7DB8AE] text-[#0E1310] font-bold text-xs px-3 py-2.5 transition-colors cursor-pointer"
                     >
-                      <span>Продолжить сохранение →</span>
+                      <span>{t.sandboxResumeBtn}</span>
                     </button>
                     <div className="grid grid-cols-2 gap-2">
                       <button
@@ -1767,7 +2019,7 @@ export default function App() {
                         onClick={() => handleStartGame('sandbox')}
                         className="flex items-center justify-center border border-[#354238] bg-[#141A15] hover:border-[#6CA69C] text-[#DCE6DF] text-xs font-semibold px-2.5 py-2 transition-colors cursor-pointer"
                       >
-                        Новая карта
+                        {t.sandboxNewMapBtn}
                       </button>
                       <button
                         type="button"
@@ -1775,7 +2027,7 @@ export default function App() {
                         className="flex items-center justify-center gap-1 border border-[#3E2C2A] bg-[#1A1515] hover:border-red-500/70 text-rose-300 text-xs font-semibold px-2.5 py-2 transition-colors cursor-pointer"
                       >
                         <Trash2 className="h-3 w-3 shrink-0" />
-                        <span>Удалить</span>
+                        <span>{t.deleteBtn}</span>
                       </button>
                     </div>
                   </div>
@@ -1794,22 +2046,22 @@ export default function App() {
                       <circle cx="40" cy="12" r="2.2" fill="#ECE8DD" />
                     </svg>
                     <span className="text-xs font-semibold text-[#6CA69C] group-hover:underline whitespace-nowrap shrink-0">
-                      Открыть карту →
+                      {t.sandboxOpenMap}
                     </span>
                   </div>
 
                   <h2 className="font-display text-2xl font-bold uppercase tracking-wide text-[#F4EFE4]">
-                    Песочница
+                    {t.sandboxTitle}
                   </h2>
 
                   <p className="mt-2 text-xs leading-relaxed text-[#A5B09F]">
-                    Свободное размещение любых пусковых установок, аэродромов, систем ППО, радаров и объектов без ограничений по ресурсам.
+                    {t.sandboxDesc}
                   </p>
 
                   <div className="mt-5 pt-3 border-t border-[#2C362E] w-full flex items-center gap-2 text-[11px] font-mono-tabular text-[#8EA39A]">
-                    <span>Все виды техники</span>
+                    <span>{t.sandboxTag1}</span>
                     <span aria-hidden="true">·</span>
-                    <span className="text-[#6CA69C]">Без лимита $</span>
+                    <span className="text-[#6CA69C]">{t.sandboxTag2}</span>
                   </div>
                 </button>
               )}
@@ -1828,22 +2080,22 @@ export default function App() {
                     <rect x="19" y="19" width="8" height="8" stroke="#ECE8DD" strokeWidth="1.2" />
                   </svg>
                   <span className="text-xs font-semibold text-[#DF9A2B] group-hover:underline whitespace-nowrap shrink-0">
-                    Начать оборону →
+                    {t.aiStartBtn}
                   </span>
                 </div>
 
                 <h2 className="font-display text-2xl font-bold uppercase tracking-wide text-[#F4EFE4]">
-                  Против ИИ
+                  {t.aiTitle}
                 </h2>
 
                 <p className="mt-2 text-xs leading-relaxed text-[#AEA99A]">
-                  Защита {INITIAL_AI_BUILDINGS.length} объектов Украины от волн БПЛА, крылатых и баллистических ракет и вылетов авиации противника.
+                  {t.aiDesc(INITIAL_AI_BUILDINGS.length, INITIAL_AI_ENEMY_BUILDINGS.length)}
                 </p>
 
                 <div className="mt-5 pt-3 border-t border-[#333025] w-full flex items-center gap-2 text-[11px] font-mono-tabular text-[#B6AD96]">
-                  <span>Старт: ${AI_STARTING_MONEY}</span>
+                  <span>{t.aiStartBudget(AI_STARTING_MONEY)}</span>
                   <span aria-hidden="true">·</span>
-                  <span className="text-[#DF9A2B]">Доход от объектов</span>
+                  <span className="text-[#DF9A2B]">{t.aiIncomeTag}</span>
                 </div>
               </button>
             </div>
@@ -1872,13 +2124,13 @@ export default function App() {
               id="sandbox-exit-modal-title"
               className="text-sm font-bold text-slate-100 truncate"
             >
-              Сохранить расстановку?
+              {t.exitModalTitle}
             </h2>
           </div>
           <button
             type="button"
             onClick={() => setSandboxExitPromptOpen(false)}
-            aria-label="Отмена"
+            aria-label={t.cancelBtn}
             className="flex h-7 w-7 items-center justify-center rounded border border-slate-800 bg-[#0E1726] text-slate-400 hover:text-white cursor-pointer"
           >
             <X className="h-4 w-4" />
@@ -1887,21 +2139,21 @@ export default function App() {
 
         <div className="p-4 space-y-3.5">
           <p className="text-xs leading-relaxed text-slate-300">
-            На карте песочницы размещены объекты и техника. Сохранить текущую расстановку, чтобы продолжить позже?
+            {t.exitModalBody}
           </p>
 
           <div className="grid grid-cols-2 gap-2 rounded border border-slate-800 bg-[#070B12] px-3 py-2.5 text-xs font-mono-tabular text-slate-300">
             <span>
-              ПУ: <strong className="text-slate-100">{playerLaunchers.length}</strong>
+              {t.launchersShort}: <strong className="text-slate-100">{playerLaunchers.length}</strong>
             </span>
             <span>
-              ППО: <strong className="text-emerald-300">{airDefenses.length}</strong>
+              {t.pvoShort}: <strong className="text-emerald-300">{airDefenses.length}</strong>
             </span>
             <span>
-              Объекты: <strong className="text-slate-100">{buildings.length}</strong>
+              {t.objectsShort}: <strong className="text-slate-100">{playerBuildings.length}</strong>
             </span>
             <span>
-              Аэродромы: <strong className="text-slate-100">{playerAirfields.length}</strong>
+              {t.airfieldsShort}: <strong className="text-slate-100">{playerAirfields.length}</strong>
             </span>
           </div>
 
@@ -1915,7 +2167,7 @@ export default function App() {
               className="w-full flex items-center justify-center gap-2 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 px-4 transition-colors cursor-pointer"
             >
               <Save className="h-4 w-4 shrink-0" />
-              <span>Сохранить и выйти</span>
+              <span>{t.saveAndExit}</span>
             </button>
             <button
               type="button"
@@ -1925,14 +2177,14 @@ export default function App() {
               }}
               className="w-full flex items-center justify-center rounded border border-red-500/45 bg-red-950/30 hover:bg-red-950/55 hover:border-red-400 text-rose-200 font-semibold text-sm py-2.5 px-4 transition-colors cursor-pointer"
             >
-              Выйти без сохранения
+              {t.exitWithoutSave}
             </button>
             <button
               type="button"
               onClick={() => setSandboxExitPromptOpen(false)}
               className="w-full flex items-center justify-center rounded border border-slate-700 bg-[#0E1726] hover:border-slate-500 text-slate-200 font-medium text-sm py-2 px-4 transition-colors cursor-pointer"
             >
-              Отмена
+              {t.cancelBtn}
             </button>
           </div>
         </div>
@@ -2023,12 +2275,15 @@ export default function App() {
             onStatsChange={setStats}
           />
           <MobileHud
+            lang={lang}
+            onChangeLang={handleChangeLang}
             gameMode={gameMode}
             gameScreen={gameScreen === 'gameover' ? 'gameover' : 'playing'}
+            aiOutcome={aiOutcome}
             simTimeMinutes={simTimeMinutes}
-            formatSimDateShort={formatSimDateShort}
+            formatSimDateShort={(m) => formatSimDateShort(m, lang)}
             formatSimTimeShort={formatSimTimeShort}
-            formatSimClock={formatSimClock}
+            formatSimClock={(m) => formatSimClock(m, lang)}
             money={money}
             aiIncomePerSec={aiIncomePerSec}
             aiWaveNumber={aiWaveNumber}
@@ -2072,6 +2327,7 @@ export default function App() {
             selectedSpec={selectedSpec}
             onSelectLauncher={handleSelectLauncher}
             onRemoveLauncher={handleRemoveLauncher}
+            onReloadLauncher={handleReloadLauncher}
             selectedAirfield={selectedAirfield}
             selectedAircraftSpec={selectedAircraftSpec}
             selectedAircraftMissileSpec={selectedAircraftMissileSpec}
@@ -2187,15 +2443,15 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen flex-col bg-[#070B12] text-slate-100 select-none overflow-hidden">
       {/* Top Command Bar */}
-      <header className="flex h-12 items-center justify-between gap-2 border-b border-slate-800 bg-[#0A111C] px-3 shrink-0 z-30">
-        <div className="flex items-center gap-2 min-w-0">
+      <header className="flex h-12 items-center justify-between gap-2 border-b border-slate-800 bg-[#0A111C] px-2.5 lg:px-3 shrink-0 z-30 overflow-hidden">
+        <div className="flex flex-1 items-center gap-2 min-w-0 overflow-hidden">
           <button
             type="button"
             onClick={() => {
               soundFx.playUiClick('toggle');
               setSidebarOpen((v) => !v);
             }}
-            aria-label="Открыть панель вооружения"
+            aria-label={t.tabTech}
             className="flex h-8 w-8 items-center justify-center rounded border border-slate-800 bg-[#0E1726] text-slate-300 hover:border-slate-700 hover:text-white transition-colors shrink-0 cursor-pointer"
           >
             {sidebarOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
@@ -2209,75 +2465,75 @@ export default function App() {
             }}
             className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 hover:text-white px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <span>Меню</span>
+            <span>{t.menuBtn}</span>
           </button>
 
-          <h1 className="font-display text-base sm:text-lg font-bold tracking-tight text-slate-50 whitespace-nowrap shrink-0 ml-0.5">
-            {gameMode === 'ai' ? 'Оборона против ИИ' : 'Оперативный штаб'}
+          <h1 className="hidden xl:block font-display text-base font-bold tracking-tight text-slate-50 truncate min-w-0 max-w-[165px] 2xl:max-w-none ml-0.5">
+            {gameMode === 'ai' ? t.headerTitleAi : t.headerTitleSandbox}
           </h1>
 
-          {/* In-Game Clock (10 game min = 1 real sec, starting 23 Nov 2026) */}
+          {/* In-Game Clock */}
           <div
-            title="Игровое время (10 игровых минут = 1 секунда)"
-            className="hidden sm:flex items-center gap-1.5 border-l border-slate-800 pl-2.5 ml-1 text-xs font-mono-tabular text-slate-300 whitespace-nowrap shrink-0"
+            title={formatSimClock(simTimeMinutes, lang)}
+            className="hidden 2xl:flex items-center gap-1.5 border-l border-slate-800 pl-2.5 ml-1 text-xs font-mono-tabular text-slate-300 whitespace-nowrap shrink-0"
           >
             <Clock className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-            <span className="font-semibold text-slate-100">{formatSimClock(simTimeMinutes)}</span>
+            <span className="font-semibold text-slate-100">{formatSimClock(simTimeMinutes, lang)}</span>
           </div>
 
           {gameMode === 'ai' ? (
-            <div className="flex items-center gap-3 border-l border-slate-800 pl-2.5 text-xs font-mono-tabular whitespace-nowrap">
+            <div className="flex items-center gap-2.5 border-l border-slate-800 pl-2.5 text-xs font-mono-tabular whitespace-nowrap shrink-0">
               <span className="flex items-center gap-1 font-bold text-amber-300">
                 <Coins className="h-3.5 w-3.5 shrink-0" />
                 ${Math.floor(money)}
                 <span className="text-[11px] font-semibold text-emerald-400">
-                  +{aiIncomePerSec}/с
+                  +{aiIncomePerSec}{t.perSecShort}
                 </span>
               </span>
               <span className="hidden md:inline text-slate-400">
-                Объекты{' '}
+                {t.objectsWord}{' '}
                 <strong className="text-emerald-300">
-                  {buildings.length}/{INITIAL_AI_BUILDINGS.length}
+                  {playerBuildings.length}/{INITIAL_AI_BUILDINGS.length}
                 </strong>
               </span>
               <span className="hidden lg:inline text-slate-400">
-                Волна <strong className="text-sky-300">#{aiWaveNumber}</strong>{' '}
-                <span className="text-slate-500">({Math.ceil(aiWaveCountdownSec)}с)</span>
+                {t.waveAbbr} <strong className="text-sky-300">#{aiWaveNumber}</strong>{' '}
+                <span className="text-slate-500">({Math.ceil(aiWaveCountdownSec)}{t.secShort})</span>
               </span>
-              <span className="hidden xl:inline text-slate-400">
-                Сбито <strong className="text-emerald-400">{stats.intercepts}</strong>
+              <span className="hidden 2xl:inline text-slate-400">
+                {t.interceptedShort} <strong className="text-emerald-400">{stats.intercepts}</strong>
               </span>
             </div>
           ) : (
-            <div className="hidden lg:flex items-center gap-2.5 border-l border-slate-800 pl-2.5 text-xs font-mono-tabular text-slate-400 whitespace-nowrap">
+            <div className="hidden lg:flex items-center gap-2 border-l border-slate-800 pl-2.5 text-xs font-mono-tabular text-slate-400 whitespace-nowrap shrink-0">
               <span>
-                ПУ <strong className="text-slate-100">{launchers.length}</strong>
+                {t.launchersShort} <strong className="text-slate-100">{launchers.length}</strong>
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                ППО <strong className="text-emerald-300">{airDefenses.length}</strong>
+                {t.pvoShort} <strong className="text-emerald-300">{airDefenses.length}</strong>
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                Цели <strong className="text-sky-300">{stats.activeFlights}</strong>
+                {t.targetsShort} <strong className="text-sky-300">{stats.activeFlights}</strong>
               </span>
-              <span aria-hidden="true">·</span>
-              <span>
-                Сбито <strong className="text-emerald-400">{stats.intercepts}</strong>
+              <span className="hidden 2xl:inline" aria-hidden="true">·</span>
+              <span className="hidden 2xl:inline">
+                {t.interceptedShort} <strong className="text-emerald-400">{stats.intercepts}</strong>
               </span>
-              <span aria-hidden="true">·</span>
-              <span>
-                Взрывы <strong className="text-amber-300">{stats.explosions}</strong>
+              <span className="hidden 2xl:inline" aria-hidden="true">·</span>
+              <span className="hidden 2xl:inline">
+                {t.explosionsShort} <strong className="text-amber-300">{stats.explosions}</strong>
               </span>
             </div>
           )}
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 lg:gap-1.5 shrink-0">
           <div
             className="hidden sm:flex items-center rounded border border-slate-800 bg-[#080D16] p-0.5"
             role="group"
-            aria-label="Скорость симуляции"
+            aria-label={t.tempoWord}
           >
             {[0.5, 1, 2, 4].map((mult) => (
               <button
@@ -2304,15 +2560,15 @@ export default function App() {
               soundFx.playUiClick('toggle');
               setShowFrontline((v) => !v);
             }}
-            title="Линия фронта"
-            className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            title={t.frontTitle}
+            className={`flex h-8 items-center gap-1.5 rounded border px-2 xl:px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showFrontline
                 ? 'border-red-500/60 bg-red-500/12 text-rose-200'
                 : 'border-slate-800 bg-[#0E1726] text-slate-300 hover:border-slate-700'
             }`}
           >
-            <Swords className="h-3.5 w-3.5" />
-            <span className="hidden md:inline">Фронт</span>
+            <Swords className="h-3.5 w-3.5 shrink-0" />
+            <span className="hidden 2xl:inline">{t.frontBtn}</span>
           </button>
 
           <button
@@ -2321,15 +2577,15 @@ export default function App() {
               soundFx.playUiClick('toggle');
               setShowRaions((v) => !v);
             }}
-            title="Районы и воздушные тревоги"
-            className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            title={t.regionsTitle}
+            className={`flex h-8 items-center gap-1.5 rounded border px-2 xl:px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showRaions
                 ? 'border-amber-500/55 bg-amber-500/10 text-amber-200'
                 : 'border-slate-800 bg-[#0E1726] text-slate-300 hover:border-slate-700'
             }`}
           >
-            <MapIcon className="h-3.5 w-3.5" />
-            <span className="hidden md:inline">Регионы</span>
+            <MapIcon className="h-3.5 w-3.5 shrink-0" />
+            <span className="hidden 2xl:inline">{t.regionsBtn}</span>
           </button>
 
           <button
@@ -2338,14 +2594,15 @@ export default function App() {
               soundFx.playUiClick('toggle');
               setShowLabels((v) => !v);
             }}
-            className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            title={t.labelsBtn}
+            className={`flex h-8 items-center gap-1.5 rounded border px-2 xl:px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showLabels
                 ? 'border-sky-500/55 bg-sky-500/10 text-sky-200'
                 : 'border-slate-800 bg-[#0E1726] text-slate-300 hover:border-slate-700'
             }`}
           >
-            <Layers className="h-3.5 w-3.5" />
-            <span className="hidden md:inline">Названия</span>
+            <Layers className="h-3.5 w-3.5 shrink-0" />
+            <span className="hidden 2xl:inline">{t.labelsBtn}</span>
           </button>
 
           <button
@@ -2355,15 +2612,28 @@ export default function App() {
               setSidebarOpen(true);
               setCatalogFilter((prev) => (prev === 'settings' ? (gameMode === 'ai' ? 'pvo' : 'all') : 'settings'));
             }}
-            title="Настройки сирен и радиуса тревоги"
-            className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            title={t.alertTitle}
+            className={`flex h-8 items-center gap-1.5 rounded border px-2 xl:px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               catalogFilter === 'settings' && sidebarOpen
                 ? 'border-rose-500/55 bg-rose-500/12 text-rose-200'
                 : 'border-slate-800 bg-[#0E1726] text-slate-300 hover:border-slate-700'
             }`}
           >
-            <SlidersHorizontal className="h-3.5 w-3.5" />
-            <span className="hidden lg:inline">Тревога</span>
+            <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
+            <span className="hidden 2xl:inline">{t.alertBtn}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              const idx = APP_LANG_OPTIONS.findIndex((o) => o.id === lang);
+              const nextOpt = APP_LANG_OPTIONS[(idx + 1) % APP_LANG_OPTIONS.length];
+              handleChangeLang(nextOpt.id);
+            }}
+            title={t.languageLabel}
+            className="flex h-8 items-center rounded border border-slate-800 bg-[#0E1726] hover:border-sky-500/55 px-2 font-mono-tabular text-[11px] font-bold text-sky-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            {APP_LANG_OPTIONS.find((o) => o.id === lang)?.short ?? 'RU'}
           </button>
 
           <button
@@ -2372,11 +2642,12 @@ export default function App() {
               soundFx.playUiClick('toggle');
               toggleMute();
             }}
-            aria-label={muted ? 'Включить звук' : 'Выключить звук'}
-            className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            title={muted ? t.mutedBtn : t.soundBtn}
+            aria-label={muted ? t.mutedBtn : t.soundBtn}
+            className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 px-2 xl:px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            {muted ? <VolumeX className="h-3.5 w-3.5 text-red-400" /> : <Volume2 className="h-3.5 w-3.5" />}
-            <span className="hidden xl:inline">{muted ? 'Без звука' : 'Звук'}</span>
+            {muted ? <VolumeX className="h-3.5 w-3.5 text-red-400 shrink-0" /> : <Volume2 className="h-3.5 w-3.5 shrink-0" />}
+            <span className="hidden 2xl:inline">{muted ? t.mutedBtn : t.soundBtn}</span>
           </button>
 
           {gameMode === 'sandbox' && (
@@ -2384,15 +2655,15 @@ export default function App() {
               type="button"
               onClick={() => handleSaveCurrentSandbox()}
               disabled={playerUnitsCount === 0}
-              title="Сохранить расстановку песочницы"
-              className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+              title={t.saveTitle}
+              className={`flex h-8 items-center gap-1.5 rounded border px-2 xl:px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                 playerUnitsCount === 0
                   ? 'border-slate-800/60 bg-[#0A111C] text-slate-600 cursor-not-allowed'
                   : 'border-emerald-600/45 bg-emerald-950/25 hover:border-emerald-400 text-emerald-200 cursor-pointer'
               }`}
             >
-              <Save className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Сохранить</span>
+              <Save className="h-3.5 w-3.5 shrink-0" />
+              <span className="hidden xl:inline">{t.saveBtn}</span>
             </button>
           )}
 
@@ -2402,11 +2673,11 @@ export default function App() {
               soundFx.playUiClick('back');
               handleClearAll();
             }}
-            title={gameMode === 'ai' ? 'Начать заново' : 'Очистить карту'}
-            className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-red-700 hover:text-red-200 px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            title={gameMode === 'ai' ? t.restartTitle : t.clearTitle}
+            className="flex h-8 items-center gap-1.5 rounded border border-slate-800 bg-[#0E1726] hover:border-red-700 hover:text-red-200 px-2 xl:px-2.5 text-xs font-medium text-slate-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <RotateCcw className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">{gameMode === 'ai' ? 'Рестарт' : 'Очистить'}</span>
+            <RotateCcw className="h-3.5 w-3.5 shrink-0" />
+            <span className="hidden xl:inline">{gameMode === 'ai' ? t.restartBtn : t.clearBtn}</span>
           </button>
 
           <button
@@ -2422,8 +2693,8 @@ export default function App() {
                 return next;
               });
             }}
-            title="Телефон · Telegram-каналы областей"
-            className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            title={t.phoneTitle}
+            className={`flex h-8 items-center gap-1.5 rounded border px-2 xl:px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               telegramOpen
                 ? 'border-sky-500/65 bg-sky-500/15 text-sky-200'
                 : totalTelegramUnread > 0
@@ -2432,7 +2703,7 @@ export default function App() {
             }`}
           >
             <Smartphone className="h-3.5 w-3.5 shrink-0" />
-            <span className="hidden md:inline">Телефон</span>
+            <span className="hidden xl:inline">{t.phoneBtn}</span>
             {totalTelegramUnread > 0 && (
               <span className="font-mono-tabular text-[11px] font-bold text-amber-300">
                 {totalTelegramUnread}
@@ -2450,15 +2721,15 @@ export default function App() {
                 return next;
               });
             }}
-            title="Статистика и журнал событий"
-            className={`flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            title={t.statsTitle}
+            className={`flex h-8 items-center gap-1.5 rounded border px-2 xl:px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               eventDrawerOpen
                 ? 'border-sky-500/65 bg-sky-500/15 text-sky-200'
                 : 'border-slate-800 bg-[#0E1726] text-slate-300 hover:border-slate-700'
             }`}
           >
-            <BarChart3 className="h-3.5 w-3.5" />
-            <span className="hidden md:inline">Статистика</span>
+            <BarChart3 className="h-3.5 w-3.5 shrink-0" />
+            <span className="hidden xl:inline">{t.statsBtn}</span>
             {eventLog.length > 0 && (
               <span className="font-mono-tabular text-[11px] text-sky-300">
                 {eventLog.length}
@@ -2479,24 +2750,25 @@ export default function App() {
           <div className="border-b border-slate-800 bg-[#070B12] shrink-0">
             <div
               className={`grid divide-x divide-slate-800/80 ${
-                gameMode === 'ai' ? 'grid-cols-4' : 'grid-cols-6'
+                gameMode === 'ai' ? 'grid-cols-5' : 'grid-cols-6'
               }`}
             >
               {(
                 gameMode === 'ai'
                   ? ([
-                      { id: 'pvo', label: 'ППО' },
-                      { id: 'infra', label: 'Объекты' },
-                      { id: 'units', label: `Карта (${playerUnitsCount})` },
-                      { id: 'settings', label: 'Тревога' },
+                      { id: 'strike', label: t.tabStrike },
+                      { id: 'pvo', label: t.tabPvo },
+                      { id: 'infra', label: t.tabObjects },
+                      { id: 'units', label: `${t.tabMap} (${playerUnitsCount})` },
+                      { id: 'settings', label: t.tabAlert },
                     ] as const)
                   : ([
-                      { id: 'all', label: 'Все' },
-                      { id: 'strike', label: 'Удар' },
-                      { id: 'pvo', label: 'ППО' },
-                      { id: 'infra', label: 'Здания' },
-                      { id: 'units', label: `Карта (${playerUnitsCount})` },
-                      { id: 'settings', label: 'Тревога' },
+                      { id: 'all', label: t.tabAll },
+                      { id: 'strike', label: t.tabStrike },
+                      { id: 'pvo', label: t.tabPvo },
+                      { id: 'infra', label: t.tabInfra },
+                      { id: 'units', label: `${t.tabMap} (${playerUnitsCount})` },
+                      { id: 'settings', label: t.tabAlert },
                     ] as const)
               ).map((tab) => (
                 <button
@@ -2506,7 +2778,7 @@ export default function App() {
                     soundFx.playUiClick('tab');
                     setCatalogFilter(tab.id);
                   }}
-                  className={`py-2.5 px-1 text-[10.5px] font-semibold tracking-tight transition-colors whitespace-nowrap cursor-pointer ${
+                  className={`py-2.5 px-1 text-[10.5px] font-semibold tracking-tight transition-colors whitespace-nowrap truncate cursor-pointer ${
                     catalogFilter === tab.id
                       ? 'bg-[#101A2B] text-white border-b-2 border-sky-400'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-[#0B121E]'
@@ -2524,7 +2796,7 @@ export default function App() {
                 <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800">
                   <div className="flex items-center gap-2">
                     <BellRing className="h-4 w-4 text-amber-400 shrink-0" />
-                    <h2 className="text-sm font-semibold text-slate-100">Сирены и тревоги</h2>
+                    <h2 className="text-sm font-semibold text-slate-100">{t.sirensAndAlerts}</h2>
                   </div>
                   <span
                     className={`font-mono-tabular text-xs font-semibold ${
@@ -2536,25 +2808,46 @@ export default function App() {
                     }`}
                   >
                     {stats.missileAlertRaions > 0
-                      ? 'Ракетная'
+                      ? t.statusMissile
                       : stats.droneAlertRaions > 0
-                        ? 'Дроновая'
-                        : 'Тихо'}
+                        ? t.statusDrone
+                        : t.statusQuiet}
                   </span>
+                </div>
+
+                {/* Language Switcher */}
+                <div className="border border-slate-800 rounded bg-[#080D16] p-3 space-y-2">
+                  <div className="text-xs font-semibold text-slate-100">{t.languageLabel}</div>
+                  <div className="grid grid-cols-3 border border-slate-800 rounded overflow-hidden divide-x divide-slate-800">
+                    {APP_LANG_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => handleChangeLang(opt.id)}
+                        className={`py-1.5 px-1 text-[11px] font-semibold transition-colors truncate cursor-pointer ${
+                          lang === opt.id
+                            ? 'bg-sky-500/20 text-sky-200'
+                            : 'bg-[#0A111C] text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Live Alert Summary */}
                 <div className="border border-slate-800 rounded bg-[#080D16] divide-y divide-slate-800/80">
                   <div className="flex items-center justify-between px-3 py-2 text-xs">
-                    <span className="text-slate-400">Жёлтая тревога (БПЛА)</span>
+                    <span className="text-slate-400">{t.yellowAlert}</span>
                     <strong className="font-mono-tabular text-yellow-300">
-                      {stats.droneAlertRaions} р-н
+                      {stats.droneAlertRaions} {t.raionUnit}
                     </strong>
                   </div>
                   <div className="flex items-center justify-between px-3 py-2 text-xs">
-                    <span className="text-slate-400">Красная тревога (Ракеты)</span>
+                    <span className="text-slate-400">{t.redAlert}</span>
                     <strong className="font-mono-tabular text-red-400">
-                      {stats.missileAlertRaions} р-н
+                      {stats.missileAlertRaions} {t.raionUnit}
                     </strong>
                   </div>
                 </div>
@@ -2564,10 +2857,10 @@ export default function App() {
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-xs font-semibold text-slate-100">
-                        Сирена воздушной тревоги
+                        {t.airRaidSiren}
                       </div>
                       <div className="text-[11px] text-slate-400">
-                        Автозапуск при угрозе в районах
+                        {t.autoOnInRaions}
                       </div>
                     </div>
                     <button
@@ -2594,7 +2887,7 @@ export default function App() {
 
                   <div className="space-y-1 pt-1 border-t border-slate-800/80">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-400">Громкость сирены</span>
+                      <span className="text-slate-400">{t.sirenVolume}</span>
                       <span className="font-mono-tabular font-semibold text-amber-300">
                         {Math.round(sirenVolume * 100)}%
                       </span>
@@ -2614,11 +2907,11 @@ export default function App() {
 
                 {/* Acoustic Channels */}
                 <div className="border border-slate-800 rounded bg-[#080D16] p-3 space-y-3">
-                  <div className="text-xs font-semibold text-slate-100">Громкость целей и ППО</div>
+                  <div className="text-xs font-semibold text-slate-100">{t.targetAndPvoVolume}</div>
 
                   <div className="space-y-1">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-400">Звук БПЛА (Шахеды)</span>
+                      <span className="text-slate-400">{t.droneVolume}</span>
                       <span className="font-mono-tabular font-semibold text-amber-300">
                         {Math.round(droneVolume * 100)}%
                       </span>
@@ -2637,7 +2930,7 @@ export default function App() {
 
                   <div className="space-y-1 pt-2 border-t border-slate-800/80">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-400">Ракеты, перехваты и взрывы</span>
+                      <span className="text-slate-400">{t.missileAndInterceptVolume}</span>
                       <span className="font-mono-tabular font-semibold text-sky-300">
                         {Math.round(missileVolume * 100)}%
                       </span>
@@ -2659,10 +2952,10 @@ export default function App() {
                 <div className="border border-slate-800 rounded bg-[#080D16] p-3 space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-semibold text-slate-100">
-                      Задержка отбоя тревоги
+                      {t.alertHoldover}
                     </span>
                     <span className="font-mono-tabular text-xs font-bold text-amber-300 whitespace-nowrap">
-                      {alertHoldoverSec} с
+                      {alertHoldoverSec} {t.secShort}
                     </span>
                   </div>
                   <input
@@ -2687,12 +2980,12 @@ export default function App() {
                             : 'bg-[#0A111C] text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        {sec}с
+                        {sec}{t.secShort}
                       </button>
                     ))}
                   </div>
                   <p className="text-[11px] leading-relaxed text-slate-400">
-                    Сколько секунд район остаётся под тревогой после вылета или сбития цели.
+                    {t.alertHoldoverDesc}
                   </p>
                 </div>
 
@@ -2700,10 +2993,10 @@ export default function App() {
                 <div className="border border-slate-800 rounded bg-[#080D16] p-3 space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-semibold text-slate-100">
-                      Радиус включения тревоги
+                      {t.alertRadius}
                     </span>
                     <span className="font-mono-tabular text-xs font-bold text-sky-300 whitespace-nowrap">
-                      {alertRadiusKm} км
+                      {alertRadiusKm} {t.kmShort}
                     </span>
                   </div>
                   <input
@@ -2728,193 +3021,197 @@ export default function App() {
                             : 'bg-[#0A111C] text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        {km} км
+                        {km} {t.kmShort}
                       </button>
                     ))}
                   </div>
                   <p className="text-[11px] leading-relaxed text-slate-400">
-                    Дистанция упреждения до границы района при подлёте воздушной цели.
+                    {t.alertRadiusDesc}
                   </p>
                 </div>
               </section>
             )}
 
-            {/* Strike Munitions (Sandbox only) */}
-            {gameMode === 'sandbox' && (catalogFilter === 'all' || catalogFilter === 'strike') && (
+            {/* Strike Munitions: RU+UA in Sandbox, UA in AI mode */}
+            {((gameMode === 'sandbox' && (catalogFilter === 'all' || catalogFilter === 'strike')) ||
+              (gameMode === 'ai' && catalogFilter === 'strike')) && (
               <section className="space-y-3.5">
-                {/* Russian Military Airfield & Naval Platforms */}
-                <div className="space-y-1.5">
-                  <div className="flex items-baseline justify-between">
-                    <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                      Носители РФ · Авиация и флот
-                    </h2>
-                    <span className="text-[10.5px] font-mono-tabular text-amber-300">КР / КАБ</span>
-                  </div>
-
-                  <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundFx.playUiClick('toggle');
-                        setAirfieldMenuOpen((v) => !v);
-                      }}
-                      className="w-full flex items-center gap-2.5 px-2.5 py-2 text-left hover:bg-[#0D1522] transition-colors cursor-pointer"
-                    >
-                      <AirfieldIcon className="w-12 h-8 shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-semibold text-amber-100 truncate">
-                            Аэродромы ВКС РФ
-                          </span>
-                          <span className="text-[10.5px] font-mono-tabular text-amber-300 whitespace-nowrap shrink-0">
-                            {airfieldMenuOpen ? 'Скрыть' : `${RUSSIAN_AIRBASE_PRESETS.length} баз`}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
-                          Ту-95МС, Ту-160, МиГ-31К, Су-57 · Х-101 / Кинжал
-                        </div>
+                {gameMode === 'sandbox' && (
+                  <>
+                    {/* Russian Military Airfield & Naval Platforms */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-baseline justify-between">
+                        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                          {t.ruCarriersTitle}
+                        </h2>
+                        <span className="text-[10.5px] font-mono-tabular text-amber-300">{t.krKabBadge}</span>
                       </div>
-                    </button>
 
-                    {airfieldMenuOpen && (
-                      <div className="bg-[#06090F] divide-y divide-slate-800/70">
-                        {RUSSIAN_AIRBASE_PRESETS.map((preset) => {
-                          const isPlaced = airfields.some((a) => a.presetId === preset.id);
-                          const aircraft = RUSSIAN_AIRCRAFT_BY_ID[preset.defaultAircraftId];
-                          const missile = MUNITION_BY_ID[aircraft.missileId];
-                          return (
-                            <button
-                              key={preset.id}
-                              type="button"
-                              onClick={() => handleDeployPresetAirbase(preset)}
-                              className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors cursor-pointer ${
-                                isPlaced ? 'bg-amber-500/12' : 'hover:bg-[#0D1522]'
-                              }`}
-                            >
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-1.5">
-                                  <Plane
-                                    className="h-3 w-3 shrink-0"
-                                    style={{ color: aircraft.accentColor }}
-                                  />
-                                  <span className="text-xs font-medium text-slate-100 truncate">
-                                    {preset.name}
-                                  </span>
-                                  <span className="text-[10px] text-slate-500 truncate">
-                                    {preset.region}
-                                  </span>
-                                </div>
-                                <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
-                                  {preset.availableAircraftIds
-                                    .map((id) => RUSSIAN_AIRCRAFT_BY_ID[id].shortName)
-                                    .join(' / ')}{' '}
-                                  · {aircraft.missileCount}× {missile.shortName}
-                                </div>
-                              </div>
-                              <span
-                                className={`text-[10.5px] font-mono-tabular font-semibold whitespace-nowrap shrink-0 ${
-                                  isPlaced ? 'text-amber-300' : 'text-sky-300'
-                                }`}
-                              >
-                                {isPlaced ? 'Перейти' : 'На карту'}
-                              </span>
-                            </button>
-                          );
-                        })}
-
+                      <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
                         <button
                           type="button"
-                          onClick={handleStartManualAirfieldPlacement}
-                          className={`w-full px-3 py-2 text-left text-[11px] font-semibold transition-colors cursor-pointer ${
-                            pendingAirfield
-                              ? 'bg-amber-500/18 text-amber-200'
-                              : 'text-slate-300 hover:bg-[#0D1522] hover:text-amber-200'
-                          }`}
+                          onClick={() => {
+                            soundFx.playUiClick('toggle');
+                            setAirfieldMenuOpen((v) => !v);
+                          }}
+                          className="w-full flex items-center gap-2.5 px-2.5 py-2 text-left hover:bg-[#0D1522] transition-colors cursor-pointer"
                         >
-                          {pendingAirfield
-                            ? 'Кликните на карту РФ или оккуп. территорию…'
-                            : '+ Разместить произвольный аэродром РФ'}
-                        </button>
-                      </div>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={handleStartNavalShipPlacement}
-                      className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
-                        pendingShip ? 'bg-sky-500/16' : 'hover:bg-[#0D1522]'
-                      }`}
-                    >
-                      <ShipIcon className="w-12 h-8 shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-semibold text-sky-100 truncate">
-                            Корабль ВМФ РФ
-                          </span>
-                          <span className="font-mono-tabular text-[10.5px] font-semibold text-amber-300 whitespace-nowrap shrink-0">
-                            {pendingShip ? 'В море…' : '8× Калибр'}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
-                          Чёрное и Азовское море · Морской ракетоносец
-                        </div>
-                      </div>
-                    </button>
-                  </div>
-                </div>
-
-                {/* RU Ground Launchers */}
-                <div className="space-y-1.5">
-                  <div className="flex items-baseline justify-between">
-                    <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                      РФ и оккуп. · БПЛА и ракеты
-                    </h2>
-                    <span className="text-[10.5px] font-mono-tabular text-rose-300">Наземные ПУ</span>
-                  </div>
-
-                  <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
-                    {MUNITIONS.filter((m) => m.faction !== 'UA' && !m.airLaunchedOnly && !m.seaLaunchedOnly).map((item) => {
-                      const isPending =
-                        pendingPlacement?.kind === 'strike' && pendingPlacement.id === item.id;
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => handleSelectStrikeCatalog(item.id)}
-                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
-                            isPending ? 'bg-amber-500/14' : 'hover:bg-[#0D1522]'
-                          }`}
-                        >
-                          <MunitionIcon id={item.id} className="w-12 h-8 shrink-0" />
+                          <AirfieldIcon className="w-12 h-8 shrink-0" />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
-                              <span className="text-xs font-semibold text-slate-100 truncate">
-                                {item.name}
+                              <span className="text-xs font-semibold text-amber-100 truncate">
+                                {t.ruAirfieldsTitle}
                               </span>
-                              <span
-                                className={`font-mono-tabular text-[11px] font-semibold whitespace-nowrap shrink-0 ${
-                                  isPending ? 'text-amber-300' : 'text-rose-300'
-                                }`}
-                              >
-                                {isPending ? 'На карту' : `-${item.damage} HP`}
+                              <span className="text-[10.5px] font-mono-tabular text-amber-300 whitespace-nowrap shrink-0">
+                                {airfieldMenuOpen ? t.hideWord : t.basesCount(RUSSIAN_AIRBASE_PRESETS.length)}
                               </span>
                             </div>
-                            <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
-                              {item.category} · {item.realSpeedKmh} км/ч · Б/К {item.maxAmmo}
-                              {item.maxRangeKm
-                                ? ` · ≤${item.maxRangeKm} км`
-                                : item.kabMaxRangeKm
-                                  ? ` · КАБ ≤${item.kabMaxRangeKm} км`
-                                  : ''}
+                            <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
+                              Ту-95МС, Ту-160, МиГ-31К, Су-57 · Х-101 / {getMunitionLocalized('kinzhal', lang).shortName}
                             </div>
                           </div>
                         </button>
-                      );
-                    })}
-                  </div>
-                </div>
 
-                {/* UA Airfields & Strike */}
+                        {airfieldMenuOpen && (
+                          <div className="bg-[#06090F] divide-y divide-slate-800/70">
+                            {RUSSIAN_AIRBASE_PRESETS.map((preset) => {
+                              const isPlaced = airfields.some((a) => a.presetId === preset.id);
+                              const aircraft = getAircraftLocalized(preset.defaultAircraftId, lang);
+                              const missile = getMunitionLocalized(aircraft.missileId, lang);
+                              return (
+                                <button
+                                  key={preset.id}
+                                  type="button"
+                                  onClick={() => handleDeployPresetAirbase(preset)}
+                                  className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors cursor-pointer ${
+                                    isPlaced ? 'bg-amber-500/12' : 'hover:bg-[#0D1522]'
+                                  }`}
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <Plane
+                                        className="h-3 w-3 shrink-0"
+                                        style={{ color: aircraft.accentColor }}
+                                      />
+                                      <span className="text-xs font-medium text-slate-100 truncate">
+                                        {preset.name}
+                                      </span>
+                                      <span className="text-[10px] text-slate-500 truncate">
+                                        {preset.region}
+                                      </span>
+                                    </div>
+                                    <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
+                                      {preset.availableAircraftIds
+                                        .map((id) => getAircraftLocalized(id, lang).shortName)
+                                        .join(' / ')}{' '}
+                                      · {aircraft.missileCount}× {missile.shortName}
+                                    </div>
+                                  </div>
+                                  <span
+                                    className={`text-[10.5px] font-mono-tabular font-semibold whitespace-nowrap shrink-0 ${
+                                      isPlaced ? 'text-amber-300' : 'text-sky-300'
+                                    }`}
+                                  >
+                                    {isPlaced ? t.goToWord : t.showOnMap}
+                                  </span>
+                                </button>
+                              );
+                            })}
+
+                            <button
+                              type="button"
+                              onClick={handleStartManualAirfieldPlacement}
+                              className={`w-full px-3 py-2 text-left text-[11px] font-semibold transition-colors cursor-pointer ${
+                                pendingAirfield
+                                  ? 'bg-amber-500/18 text-amber-200'
+                                  : 'text-slate-300 hover:bg-[#0D1522] hover:text-amber-200'
+                              }`}
+                            >
+                              {pendingAirfield ? t.clickRuOrOccupied : t.placeCustomRuAirfield}
+                            </button>
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={handleStartNavalShipPlacement}
+                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                            pendingShip ? 'bg-sky-500/16' : 'hover:bg-[#0D1522]'
+                          }`}
+                        >
+                          <ShipIcon className="w-12 h-8 shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-semibold text-sky-100 truncate">
+                                {t.ruNavalShip}
+                              </span>
+                              <span className="font-mono-tabular text-[10.5px] font-semibold text-amber-300 whitespace-nowrap shrink-0">
+                                {pendingShip ? t.inSeaWord : `8× ${getMunitionLocalized('kalibr', lang).shortName}`}
+                              </span>
+                            </div>
+                            <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
+                              {t.ruNavalShipSub}
+                            </div>
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* RU Ground Launchers */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-baseline justify-between">
+                        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                          {t.ruGroundTitle}
+                        </h2>
+                        <span className="text-[10.5px] font-mono-tabular text-rose-300">{t.groundLaunchersTag}</span>
+                      </div>
+
+                      <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
+                        {MUNITIONS.filter((m) => m.faction !== 'UA' && !m.airLaunchedOnly && !m.seaLaunchedOnly).map((rawItem) => {
+                          const item = getMunitionLocalized(rawItem.id, lang);
+                          const isPending =
+                            pendingPlacement?.kind === 'strike' && pendingPlacement.id === item.id;
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              onClick={() => handleSelectStrikeCatalog(item.id)}
+                              className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
+                                isPending ? 'bg-amber-500/14' : 'hover:bg-[#0D1522]'
+                              }`}
+                            >
+                              <MunitionIcon id={item.id} className="w-12 h-8 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-slate-100 truncate">
+                                    {item.name}
+                                  </span>
+                                  <span
+                                    className={`font-mono-tabular text-[11px] font-semibold whitespace-nowrap shrink-0 ${
+                                      isPending ? 'text-amber-300' : 'text-rose-300'
+                                    }`}
+                                  >
+                                    {isPending ? t.onMapWord : `-${item.damage} HP`}
+                                  </span>
+                                </div>
+                                <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
+                                  {item.category} · {item.realSpeedKmh} {t.kmhShort} · {t.ammoShort} {item.maxAmmo}
+                                  {item.maxRangeKm
+                                    ? ` · ≤${item.maxRangeKm} ${t.kmShort}`
+                                    : item.kabMaxRangeKm
+                                      ? ` · ≤${item.kabMaxRangeKm} ${t.kmShort}`
+                                      : ''}
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* UA Airfields & Strike (available in both Sandbox and AI mode) */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5">
@@ -2923,11 +3220,11 @@ export default function App() {
                         <span className="h-1.5 w-full bg-yellow-400" />
                       </span>
                       <h2 className="text-[11px] font-semibold uppercase tracking-wider text-sky-300">
-                        ВСУ · Авиация, БПЛА и ракеты
+                        {t.uaSectionTitle}
                       </h2>
                     </div>
                     <span className="text-[10.5px] font-mono-tabular text-sky-400 whitespace-nowrap">
-                      Территория UA
+                      {t.uaTerritoryTag}
                     </span>
                   </div>
 
@@ -2944,10 +3241,14 @@ export default function App() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-xs font-semibold text-sky-100 truncate">
-                            Аэродромы ВСУ
+                            {t.uaAirfieldsTitle}
                           </span>
                           <span className="text-[10.5px] font-mono-tabular text-sky-300 whitespace-nowrap shrink-0">
-                            {uaAirfieldMenuOpen ? 'Скрыть' : `${UKRAINIAN_AIRBASE_PRESETS.length} баз`}
+                            {uaAirfieldMenuOpen
+                              ? t.hideWord
+                              : gameMode === 'ai'
+                                ? `$${UA_AIRFIELD_AI_COST}`
+                                : t.basesCount(UKRAINIAN_AIRBASE_PRESETS.length)}
                           </span>
                         </div>
                         <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
@@ -2960,15 +3261,20 @@ export default function App() {
                       <div className="bg-[#06090F] divide-y divide-slate-800/70">
                         {UKRAINIAN_AIRBASE_PRESETS.map((preset) => {
                           const isPlaced = airfields.some((a) => a.presetId === preset.id);
-                          const aircraft = RUSSIAN_AIRCRAFT_BY_ID[preset.defaultAircraftId];
-                          const missile = MUNITION_BY_ID[aircraft.missileId];
+                          const aircraft = getAircraftLocalized(preset.defaultAircraftId, lang);
+                          const missile = getMunitionLocalized(aircraft.missileId, lang);
+                          const cantAffordAf = gameMode === 'ai' && !isPlaced && money < UA_AIRFIELD_AI_COST;
                           return (
                             <button
                               key={preset.id}
                               type="button"
                               onClick={() => handleDeployPresetAirbase(preset)}
                               className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-left transition-colors cursor-pointer ${
-                                isPlaced ? 'bg-sky-500/14' : 'hover:bg-[#0D1522]'
+                                isPlaced
+                                  ? 'bg-sky-500/14'
+                                  : cantAffordAf
+                                    ? 'opacity-50 hover:bg-[#0D1522]'
+                                    : 'hover:bg-[#0D1522]'
                               }`}
                             >
                               <div className="min-w-0 flex-1">
@@ -2986,17 +3292,27 @@ export default function App() {
                                 </div>
                                 <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
                                   {preset.availableAircraftIds
-                                    .map((id) => RUSSIAN_AIRCRAFT_BY_ID[id].shortName)
+                                    .map((id) => getAircraftLocalized(id, lang).shortName)
                                     .join(' / ')}{' '}
                                   · {aircraft.missileCount}× {missile.shortName}
                                 </div>
                               </div>
                               <span
                                 className={`text-[10.5px] font-mono-tabular font-semibold whitespace-nowrap shrink-0 ${
-                                  isPlaced ? 'text-sky-300' : 'text-blue-300'
+                                  isPlaced
+                                    ? 'text-sky-300'
+                                    : cantAffordAf
+                                      ? 'text-red-400'
+                                      : gameMode === 'ai'
+                                        ? 'text-amber-300'
+                                        : 'text-blue-300'
                                 }`}
                               >
-                                {isPlaced ? 'Перейти' : 'На карту'}
+                                {isPlaced
+                                  ? t.goToWord
+                                  : gameMode === 'ai'
+                                    ? `$${UA_AIRFIELD_AI_COST}`
+                                    : t.showOnMap}
                               </span>
                             </button>
                           );
@@ -3005,29 +3321,47 @@ export default function App() {
                         <button
                           type="button"
                           onClick={handleStartManualUaAirfieldPlacement}
-                          className={`w-full px-3 py-2 text-left text-[11px] font-semibold transition-colors cursor-pointer ${
+                          className={`w-full px-3 py-2 text-left text-[11px] font-semibold transition-colors cursor-pointer flex items-center justify-between gap-2 ${
                             pendingAirfieldUa
                               ? 'bg-sky-500/20 text-sky-200'
-                              : 'text-slate-300 hover:bg-[#0D1522] hover:text-sky-200'
+                              : gameMode === 'ai' && money < UA_AIRFIELD_AI_COST
+                                ? 'opacity-50 text-slate-400 hover:bg-[#0D1522]'
+                                : 'text-slate-300 hover:bg-[#0D1522] hover:text-sky-200'
                           }`}
                         >
-                          {pendingAirfieldUa
-                            ? 'Нажмите на подконтрольную Украину…'
-                            : '+ Разместить произвольный аэродром ВСУ'}
+                          <span className="truncate">
+                            {pendingAirfieldUa ? t.clickControlledUa : t.placeCustomUaAirfield}
+                          </span>
+                          {gameMode === 'ai' && !pendingAirfieldUa && (
+                            <span
+                              className={`font-mono-tabular shrink-0 ${
+                                money < UA_AIRFIELD_AI_COST ? 'text-red-400' : 'text-amber-300'
+                              }`}
+                            >
+                              ${UA_AIRFIELD_AI_COST}
+                            </span>
+                          )}
                         </button>
                       </div>
                     )}
 
-                    {MUNITIONS.filter((m) => m.faction === 'UA' && !m.airLaunchedOnly).map((item) => {
+                    {MUNITIONS.filter((m) => m.faction === 'UA' && !m.airLaunchedOnly).map((rawItem) => {
+                      const item = getMunitionLocalized(rawItem.id, lang);
                       const isPending =
                         pendingPlacement?.kind === 'strike' && pendingPlacement.id === item.id;
+                      const itemCost = rawItem.cost ?? 0;
+                      const cantAfford = gameMode === 'ai' && itemCost > 0 && money < itemCost;
                       return (
                         <button
                           key={item.id}
                           type="button"
                           onClick={() => handleSelectStrikeCatalog(item.id)}
                           className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left transition-colors cursor-pointer ${
-                            isPending ? 'bg-sky-500/16' : 'hover:bg-[#0D1522]'
+                            isPending
+                              ? 'bg-sky-500/16'
+                              : cantAfford
+                                ? 'opacity-50 hover:bg-[#0D1522]'
+                                : 'hover:bg-[#0D1522]'
                           }`}
                         >
                           <MunitionIcon id={item.id} className="w-12 h-8 shrink-0" />
@@ -3036,16 +3370,27 @@ export default function App() {
                               <span className="text-xs font-semibold text-slate-100 truncate">
                                 {item.name}
                               </span>
-                              <span
-                                className={`font-mono-tabular text-[11px] font-semibold whitespace-nowrap shrink-0 ${
-                                  isPending ? 'text-sky-300' : 'text-rose-300'
-                                }`}
-                              >
-                                {isPending ? 'На карту UA' : `-${item.damage} HP`}
-                              </span>
+                              {isPending ? (
+                                <span className="font-mono-tabular text-[11px] font-semibold text-sky-300 whitespace-nowrap shrink-0">
+                                  {t.onUaMapWord}
+                                </span>
+                              ) : gameMode === 'ai' && itemCost > 0 ? (
+                                <span
+                                  className={`font-mono-tabular text-[11px] font-bold whitespace-nowrap shrink-0 ${
+                                    cantAfford ? 'text-red-400' : 'text-amber-300'
+                                  }`}
+                                >
+                                  ${itemCost}
+                                </span>
+                              ) : (
+                                <span className="font-mono-tabular text-[11px] font-semibold text-rose-300 whitespace-nowrap shrink-0">
+                                  -{item.damage} HP
+                                </span>
+                              )}
                             </div>
                             <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
-                              {item.category} · {item.realSpeedKmh} км/ч · Б/К {item.maxAmmo}
+                              {item.category} · {item.realSpeedKmh} {t.kmhShort} · {t.ammoShort} {item.maxAmmo}
+                              {gameMode === 'ai' ? ` · -${item.damage} HP` : ''}
                             </div>
                           </div>
                         </button>
@@ -3061,16 +3406,23 @@ export default function App() {
               <section className={catalogFilter === 'all' ? 'pt-3 border-t border-slate-800 space-y-1.5' : 'space-y-1.5'}>
                 <div className="flex items-baseline justify-between">
                   <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                    Средства ППО и РЛС
+                    {t.pvoSectionTitle}
                   </h2>
-                  <span className="text-[10.5px] font-mono-tabular text-emerald-400">Автоперехват</span>
+                  <span className="text-[10.5px] font-mono-tabular text-emerald-400">{t.autoInterceptTag}</span>
                 </div>
 
                 <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
-                  {AIR_DEFENSE_SYSTEMS.map((pvo) => {
+                  {AIR_DEFENSE_SYSTEMS.map((rawPvo) => {
+                    const pvo = getPvoLocalized(rawPvo.id, lang);
                     const isPending =
                       pendingPlacement?.kind === 'pvo' && pendingPlacement.id === pvo.id;
                     const cantAfford = gameMode === 'ai' && money < pvo.cost;
+                    const unitWord =
+                      pvo.id === 'mg-pickup'
+                        ? t.roundsShort
+                        : pvo.isGun
+                          ? t.burstsShort
+                          : t.missilesShort;
                     return (
                       <button
                         key={pvo.id}
@@ -3092,7 +3444,7 @@ export default function App() {
                             </span>
                             {isPending ? (
                               <span className="text-[11px] font-mono-tabular font-semibold text-emerald-300 whitespace-nowrap shrink-0">
-                                На карту
+                                {t.onMapWord}
                               </span>
                             ) : gameMode === 'ai' ? (
                               <span
@@ -3110,8 +3462,8 @@ export default function App() {
                           </div>
                           <div className="mt-0.5 text-[10.5px] font-mono-tabular text-slate-400 truncate">
                             {pvo.isRadar
-                              ? `РЛС обзор ${pvo.rangeKm} км · +45% дальности ППО`
-                              : `R ${pvo.rangeKm} км · Б/К ${pvo.maxAmmo} ${pvo.id === 'mg-pickup' ? 'патр.' : pvo.isGun ? 'очер.' : 'ракет'} · ${pvo.cooldownSec}с`}
+                              ? t.radarOverview(pvo.rangeKm)
+                              : t.pvoSpecsLine(pvo.rangeKm, pvo.maxAmmo, unitWord, pvo.cooldownSec)}
                           </div>
                         </div>
                       </button>
@@ -3126,17 +3478,17 @@ export default function App() {
               <section className={catalogFilter === 'all' ? 'pt-3 border-t border-slate-800 space-y-2' : 'space-y-2'}>
                 <div className="flex items-baseline justify-between">
                   <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                    {gameMode === 'ai' ? 'Защищаемые объекты' : 'Инфраструктура и объекты'}
+                    {gameMode === 'ai' ? t.defendedObjectsTitle : t.infraAndObjectsTitle}
                   </h2>
                   <span className="text-[10.5px] font-mono-tabular text-amber-300">
-                    {gameMode === 'ai' ? `+$${aiIncomePerSec}/с` : `${BUILDINGS.length} типов`}
+                    {gameMode === 'ai' ? `+$${aiIncomePerSec}${t.perSecShort}` : t.typesCount(BUILDINGS.length)}
                   </span>
                 </div>
 
                 {/* Building Size Control */}
                 <div className="border border-slate-800/90 rounded bg-[#070B12] p-2.5 space-y-2">
                   <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-300 font-medium">Масштаб объектов на карте</span>
+                    <span className="text-slate-300 font-medium">{t.buildingScaleLabel}</span>
                     <span className="font-mono-tabular font-bold text-sky-300">
                       {Math.round(buildingScale * 100)}%
                     </span>
@@ -3169,9 +3521,90 @@ export default function App() {
                   </div>
                 </div>
 
+                {gameMode === 'ai' && (
+                  <div className="space-y-2">
+                    {/* Friendly Defended Objects */}
+                    <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
+                      {playerBuildings.map((b, idx) => {
+                        const spec = getBuildingLocalized(b.buildingId, lang);
+                        const tpl = INITIAL_AI_BUILDINGS.find((x) => x.id === b.id);
+                        const hpRatio = Math.max(0, Math.min(1, b.hp / Math.max(1, b.maxHp)));
+                        const hpColor = hpRatio > 0.55 ? '#22C55E' : hpRatio > 0.25 ? '#F59E0B' : '#EF4444';
+                        return (
+                          <button
+                            key={b.id}
+                            type="button"
+                            onClick={() => setFocusCoords({ lat: b.lat, lng: b.lng })}
+                            className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-[#0D1624] cursor-pointer"
+                          >
+                            <Building2 className="h-3.5 w-3.5 shrink-0" style={{ color: spec.accentColor }} />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-semibold text-slate-100 truncate">
+                                  #{idx + 1} · {tpl ? tpl.label : spec.name}
+                                </span>
+                                <span className="font-mono-tabular text-[11px] font-semibold shrink-0" style={{ color: hpColor }}>
+                                  +${spec.incomePerSec}{t.perSecShort} · {Math.ceil(b.hp)}/{b.maxHp}
+                                </span>
+                              </div>
+                              <div className="mt-1 h-1 w-full bg-slate-800 overflow-hidden">
+                                <div className="h-full transition-all" style={{ width: `${Math.round(hpRatio * 100)}%`, backgroundColor: hpColor }} />
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Enemy AI Targets */}
+                    <div className="pt-2 border-t border-slate-800 space-y-1.5">
+                      <div className="flex items-baseline justify-between">
+                        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-rose-300">
+                          {t.enemyTargetsTitle}
+                        </h2>
+                        <span className="text-[10.5px] font-mono-tabular text-rose-300">
+                          {aiEnemyBuildings.length}/{INITIAL_AI_ENEMY_BUILDINGS.length}
+                        </span>
+                      </div>
+                      <div className="border border-rose-500/25 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
+                        {aiEnemyBuildings.map((b, idx) => {
+                          const spec = getBuildingLocalized(b.buildingId, lang);
+                          const tpl = INITIAL_AI_ENEMY_BUILDINGS.find((x) => x.id === b.id);
+                          const hpRatio = Math.max(0, Math.min(1, b.hp / Math.max(1, b.maxHp)));
+                          const bounty = getAiBuildingBounty(b.buildingId);
+                          return (
+                            <button
+                              key={b.id}
+                              type="button"
+                              onClick={() => setFocusCoords({ lat: b.lat, lng: b.lng, zoom: 7 })}
+                              className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-rose-950/20 cursor-pointer"
+                            >
+                              <Crosshair className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-rose-100 truncate">
+                                    #{idx + 1} · {tpl ? tpl.label : spec.name}
+                                  </span>
+                                  <span className="font-mono-tabular text-[11px] font-semibold text-amber-300 shrink-0">
+                                    +${bounty} · {Math.ceil(b.hp)}/{b.maxHp}
+                                  </span>
+                                </div>
+                                <div className="mt-1 h-1 w-full bg-slate-800 overflow-hidden">
+                                  <div className="h-full bg-rose-500 transition-all" style={{ width: `${Math.round(hpRatio * 100)}%` }} />
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {gameMode === 'sandbox' && (
                   <div className="border border-slate-800/90 rounded bg-[#070B12] divide-y divide-slate-800/80 overflow-hidden">
-                    {BUILDINGS.map((bldg) => {
+                    {BUILDINGS.map((rawBldg) => {
+                      const bldg = getBuildingLocalized(rawBldg.id, lang);
                       const isPending =
                         pendingPlacement?.kind === 'infra' && pendingPlacement.id === bldg.id;
                       return (
@@ -3194,7 +3627,7 @@ export default function App() {
                                   isPending ? 'text-sky-300' : 'text-emerald-300'
                                 }`}
                               >
-                                {isPending ? 'На карту' : `${bldg.maxHp} HP`}
+                                {isPending ? t.onMapWord : `${bldg.maxHp} HP`}
                               </span>
                             </div>
                             <div className="mt-0.5 text-[10.5px] text-slate-400 truncate">
@@ -3209,10 +3642,8 @@ export default function App() {
               </section>
             )}
 
-            {/* Placed Player Units List (never exposes AI forces or actions) */}
-            {(catalogFilter === 'units' ||
-              catalogFilter === 'all' ||
-              (gameMode === 'ai' && catalogFilter === 'infra')) && (
+            {/* Placed Player Units List */}
+            {(catalogFilter === 'units' || catalogFilter === 'all') && (
               <section
                 className={
                   catalogFilter === 'units' ? 'space-y-2.5' : 'pt-3 border-t border-slate-800 space-y-2.5'
@@ -3220,26 +3651,27 @@ export default function App() {
               >
                 <div className="flex items-baseline justify-between">
                   <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                    Развёрнуто на карте
+                    {t.deployedOnMapTitle}
                   </h2>
                   <span className="font-mono-tabular text-[11px] font-semibold text-slate-300">
-                    {playerUnitsCount} ед.
+                    {playerUnitsCount} {t.unitsShort}
                   </span>
                 </div>
 
                 {playerUnitsCount === 0 ? (
                   <p className="border border-slate-800/80 rounded bg-[#070B12] p-3 text-xs text-slate-500 leading-relaxed">
-                    Выберите ППО, объект или пусковую установку и разместите кликом по карте.
+                    {t.emptyMapHint}
                   </p>
                 ) : (
                   <div className="border border-slate-800/90 rounded divide-y divide-slate-800/80 overflow-hidden bg-[#070B12]">
                     {playerAirfields.map((af) => {
-                      const acSpec = RUSSIAN_AIRCRAFT_BY_ID[af.selectedAircraftId];
-                      const missileSpec = MUNITION_BY_ID[acSpec.missileId];
+                      const acSpec = getAircraftLocalized(af.selectedAircraftId, lang);
+                      const missileSpec = getMunitionLocalized(acSpec.missileId, lang);
                       const isSelected = selectedAirfieldId === af.id;
                       const isUa = af.faction === 'UA';
                       const territory = getTerritoryAt(af.lat, af.lng);
                       const occupied = territory === 'UA' && isPointInOccupiedTerritory(af.lat, af.lng);
+                      const afRefund = Math.round(UA_AIRFIELD_AI_COST * 0.5);
                       return (
                         <div
                           key={af.id}
@@ -3278,7 +3710,7 @@ export default function App() {
                                 </span>
                               </div>
                               <div className="mt-0.5 font-mono-tabular text-[10px] text-slate-400 truncate">
-                                {occupied ? 'Оккуп. терр.' : territory === 'RU' ? 'Россия' : 'Украина'} ·{' '}
+                                {occupied ? t.territoryOccupied : territory === 'RU' ? t.territoryRu : t.territoryUa} ·{' '}
                                 {acSpec.shortName}
                               </div>
                             </div>
@@ -3287,7 +3719,10 @@ export default function App() {
                           <button
                             type="button"
                             onClick={() => handleRemoveAirfield(af.id)}
-                            aria-label="Удалить аэродром"
+                            title={
+                              gameMode === 'ai' && isUa ? t.sellTooltip(afRefund) : t.deleteBtn
+                            }
+                            aria-label={t.deleteBtn}
                             className="flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:text-red-300 hover:bg-red-950/50 transition-colors shrink-0 cursor-pointer"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
@@ -3297,89 +3732,109 @@ export default function App() {
                     })}
 
                     {playerLaunchers.map((l, idx) => {
-                      const spec = MUNITION_BY_ID[l.munitionId];
+                      const spec = getMunitionLocalized(l.munitionId, lang);
                       const isSelected = selectedLauncherId === l.id;
                       const territory = getTerritoryAt(l.lat, l.lng);
                       const occupied = territory === 'UA' && isPointInOccupiedTerritory(l.lat, l.lng);
+                      const launcherCost = spec.cost ?? 0;
+                      const reloadCost = Math.round((spec.cost ?? 150) * 0.35);
                       return (
                         <div
                           key={l.id}
-                          className={`flex items-center justify-between gap-2 px-2.5 py-2 transition-colors ${
+                          className={`px-2.5 py-2 space-y-1.5 transition-colors ${
                             isSelected ? 'bg-sky-500/12' : 'hover:bg-[#0D1624]'
                           }`}
                         >
-                          <button
-                            type="button"
-                            onClick={() => {
-                              handleSelectLauncher(l.id);
-                              setFocusCoords({ lat: l.lat, lng: l.lng });
-                              soundFx.playSelectLauncher();
-                            }}
-                            className="flex flex-1 items-center gap-2 min-w-0 text-left cursor-pointer"
-                          >
-                            <Crosshair
-                              className="h-3.5 w-3.5 shrink-0"
-                              style={{ color: spec.accentColor }}
-                            />
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-xs font-semibold text-slate-100 truncate">
-                                  {l.isNavalShip
-                                    ? `Корабль #${idx + 1} · ${spec.shortName}`
-                                    : `ПУ #${idx + 1} · ${spec.shortName}`}
-                                </span>
-                                <span
-                                  className={`font-mono-tabular text-[11px] font-semibold shrink-0 ${
-                                    l.ammo > 0 ? 'text-slate-200' : 'text-red-400'
-                                  }`}
-                                >
-                                  {l.ammo}/{l.maxAmmo}
-                                </span>
-                              </div>
-                              <div className="mt-1 flex items-center gap-0.5">
-                                {Array.from({ length: l.maxAmmo }).map((_, slotIdx) => (
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSelectLauncher(l.id);
+                                setFocusCoords({ lat: l.lat, lng: l.lng });
+                                soundFx.playSelectLauncher();
+                              }}
+                              className="flex flex-1 items-center gap-2 min-w-0 text-left cursor-pointer"
+                            >
+                              <Crosshair
+                                className="h-3.5 w-3.5 shrink-0"
+                                style={{ color: spec.accentColor }}
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-slate-100 truncate">
+                                    {l.isNavalShip
+                                      ? `${t.shipLabel} #${idx + 1} · ${spec.shortName}`
+                                      : `${t.launcherLabel} #${idx + 1} · ${spec.shortName}`}
+                                  </span>
                                   <span
-                                    key={slotIdx}
-                                    className="h-1 flex-1 transition-colors"
-                                    style={{
-                                      backgroundColor:
-                                        slotIdx < l.ammo ? spec.accentColor : 'rgba(51, 65, 85, 0.7)',
-                                    }}
-                                  />
-                                ))}
+                                    className={`font-mono-tabular text-[11px] font-semibold shrink-0 ${
+                                      l.ammo > 0 ? 'text-slate-200' : 'text-red-400'
+                                    }`}
+                                  >
+                                    {l.ammo}/{l.maxAmmo}
+                                  </span>
+                                </div>
+                                <div className="mt-1 flex items-center gap-0.5">
+                                  {Array.from({ length: l.maxAmmo }).map((_, slotIdx) => (
+                                    <span
+                                      key={slotIdx}
+                                      className="h-1 flex-1 transition-colors"
+                                      style={{
+                                        backgroundColor:
+                                          slotIdx < l.ammo ? spec.accentColor : 'rgba(51, 65, 85, 0.7)',
+                                      }}
+                                    />
+                                  ))}
+                                </div>
+                                <div className="mt-1 font-mono-tabular text-[10px] text-slate-400 truncate">
+                                  {l.isNavalShip
+                                    ? t.territorySea
+                                    : occupied
+                                      ? t.territoryOccupied
+                                      : territory === 'UA'
+                                        ? t.territoryUa
+                                        : t.territoryRu}{' '}
+                                  ·{' '}
+                                  {l.ammo > 0
+                                    ? `${l.lat.toFixed(2)}, ${l.lng.toFixed(2)}`
+                                    : l.munitionId === 'airstrike'
+                                      ? t.sortieDone
+                                      : t.ammoEmpty}
+                                </div>
                               </div>
-                              <div className="mt-1 font-mono-tabular text-[10px] text-slate-400 truncate">
-                                {l.isNavalShip
-                                  ? 'Море (Чёрное/Азовское)'
-                                  : occupied
-                                    ? 'Оккуп. терр.'
-                                    : territory === 'UA'
-                                      ? 'Украина'
-                                      : 'Россия'}{' '}
-                                ·{' '}
-                                {l.ammo > 0
-                                  ? `${l.lat.toFixed(2)}, ${l.lng.toFixed(2)}`
-                                  : l.munitionId === 'airstrike'
-                                    ? 'Вылет выполнен'
-                                    : 'Б/К пуст'}
-                              </div>
-                            </div>
-                          </button>
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveLauncher(l.id)}
-                            aria-label="Удалить пусковую установку"
-                            className="flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:text-red-300 hover:bg-red-950/50 transition-colors shrink-0 cursor-pointer"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveLauncher(l.id)}
+                              title={
+                                gameMode === 'ai' && launcherCost > 0
+                                  ? t.sellTooltip(Math.round(launcherCost * 0.5))
+                                  : t.deleteBtn
+                              }
+                              aria-label={t.deleteBtn}
+                              className="flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:text-red-300 hover:bg-red-950/50 transition-colors shrink-0 cursor-pointer"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+
+                          {l.ammo < l.maxAmmo && (
+                            <button
+                              type="button"
+                              onClick={() => handleReloadLauncher(l.id)}
+                              className="w-full flex items-center justify-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 px-2 py-1 text-[10.5px] font-medium text-sky-200 cursor-pointer"
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                              <span>{t.reloadBtn} {gameMode === 'ai' ? `($${reloadCost})` : ''}</span>
+                            </button>
+                          )}
                         </div>
                       );
                     })}
 
                     {airDefenses.map((p, idx) => {
-                      const spec = AIR_DEFENSE_BY_ID[p.airDefenseId];
+                      const spec = getPvoLocalized(p.airDefenseId, lang);
                       const territory = getTerritoryAt(p.lat, p.lng);
                       const hpRatio = Math.max(0, Math.min(1, p.hp / Math.max(1, p.maxHp)));
                       const hpColor =
@@ -3401,11 +3856,11 @@ export default function App() {
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center justify-between gap-2">
                                   <span className="text-xs font-semibold text-slate-100 truncate">
-                                    ППО #{idx + 1} · {spec.shortName}
+                                    {t.pvoShort} #{idx + 1} · {spec.shortName}
                                   </span>
                                   {spec.isRadar ? (
                                     <span className="font-mono-tabular text-[11px] font-semibold text-cyan-300 shrink-0">
-                                      РЛС · {Math.ceil(p.hp)}/{p.maxHp}
+                                      {t.radarLabel} · {Math.ceil(p.hp)}/{p.maxHp}
                                     </span>
                                   ) : (
                                     <span
@@ -3427,10 +3882,10 @@ export default function App() {
                                   />
                                 </div>
                                 <div className="mt-1 font-mono-tabular text-[10px] text-slate-400 truncate">
-                                  {territory === 'UA' ? 'Украина' : 'Россия'} ·{' '}
+                                  {territory === 'UA' ? t.territoryUa : t.territoryRu} ·{' '}
                                   {spec.isRadar
-                                    ? `Обзор ${spec.rangeKm} км (+45% ППО)`
-                                    : `Радиус ${spec.rangeKm} км`}
+                                    ? `${t.overviewWord} ${spec.rangeKm} ${t.kmShort} (+45% ${t.pvoShort})`
+                                    : `${t.rangeWord} ${spec.rangeKm} ${t.kmShort}`}
                                 </div>
                               </div>
                             </button>
@@ -3440,10 +3895,10 @@ export default function App() {
                               onClick={() => handleRemovePvo(p.id)}
                               title={
                                 gameMode === 'ai'
-                                  ? `Продать (+$${Math.round(spec.cost * 0.5)})`
-                                  : 'Удалить ППО'
+                                  ? t.sellTooltip(Math.round(spec.cost * 0.5))
+                                  : t.deleteBtn
                               }
-                              aria-label="Удалить ППО"
+                              aria-label={t.deleteBtn}
                               className="flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:text-red-300 hover:bg-red-950/50 transition-colors shrink-0 cursor-pointer"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
@@ -3459,7 +3914,7 @@ export default function App() {
                                   className="flex-1 flex items-center justify-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 px-2 py-1 text-[10.5px] font-medium text-sky-200 cursor-pointer"
                                 >
                                   <RefreshCw className="h-3 w-3" />
-                                  <span>Б/К {gameMode === 'ai' ? `($${reloadCost})` : ''}</span>
+                                  <span>{t.reloadBtn} {gameMode === 'ai' ? `($${reloadCost})` : ''}</span>
                                 </button>
                               )}
                               {p.hp < p.maxHp && (
@@ -3469,7 +3924,7 @@ export default function App() {
                                   className="flex-1 flex items-center justify-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 px-2 py-1 text-[10.5px] font-medium text-emerald-200 cursor-pointer"
                                 >
                                   <Wrench className="h-3 w-3" />
-                                  <span>Ремонт {gameMode === 'ai' ? `($${repairCost})` : ''}</span>
+                                  <span>{t.repairBtn} {gameMode === 'ai' ? `($${repairCost})` : ''}</span>
                                 </button>
                               )}
                             </div>
@@ -3478,8 +3933,8 @@ export default function App() {
                       );
                     })}
 
-                    {buildings.map((b, idx) => {
-                      const spec = BUILDING_BY_ID[b.buildingId];
+                    {playerBuildings.map((b, idx) => {
+                      const spec = getBuildingLocalized(b.buildingId, lang);
                       const territory = getTerritoryAt(b.lat, b.lng);
                       const hpRatio = Math.max(0, Math.min(1, b.hp / Math.max(1, b.maxHp)));
                       const hpColor =
@@ -3507,7 +3962,7 @@ export default function App() {
                                   className="font-mono-tabular text-[11px] font-semibold shrink-0"
                                   style={{ color: hpColor }}
                                 >
-                                  {gameMode === 'ai' ? `+$${spec.incomePerSec}/с · ` : ''}
+                                  {gameMode === 'ai' ? `+$${spec.incomePerSec}${t.perSecShort} · ` : ''}
                                   {Math.ceil(b.hp)}/{b.maxHp}
                                 </span>
                               </div>
@@ -3521,7 +3976,7 @@ export default function App() {
                                 />
                               </div>
                               <div className="mt-1 font-mono-tabular text-[10px] text-slate-400 truncate">
-                                {territory === 'UA' ? 'Украина' : 'Россия'} ·{' '}
+                                {territory === 'UA' ? t.territoryUa : t.territoryRu} ·{' '}
                                 {b.lat.toFixed(2)}, {b.lng.toFixed(2)}
                               </div>
                             </div>
@@ -3531,7 +3986,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => handleRemoveBuilding(b.id)}
-                              aria-label="Удалить объект"
+                              aria-label={t.deleteBtn}
                               className="flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:text-red-300 hover:bg-red-950/50 transition-colors shrink-0 cursor-pointer"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
@@ -3540,6 +3995,83 @@ export default function App() {
                         </div>
                       );
                     })}
+                  </div>
+                )}
+                {gameMode === 'ai' && (airfields.some((a) => a.isAi) || launchers.some((l) => l.isAi)) && (
+                  <div className="space-y-2 pt-1">
+                    <div className="flex items-baseline justify-between">
+                      <h3 className="text-[10.5px] font-semibold uppercase tracking-wider text-rose-300/90">
+                        {lang === 'uk'
+                          ? 'Техніка ШІ (на мапі)'
+                          : lang === 'en'
+                            ? 'AI Assets (On Map)'
+                            : 'Техника ИИ (на карте)'}
+                      </h3>
+                      <span className="font-mono-tabular text-[10.5px] font-semibold text-rose-300">
+                        {airfields.filter((a) => a.isAi).length + launchers.filter((l) => l.isAi).length} {t.unitsShort}
+                      </span>
+                    </div>
+
+                    <div className="border border-rose-500/30 rounded divide-y divide-slate-800/80 overflow-hidden bg-[#070B12]">
+                      {airfields
+                        .filter((af) => af.isAi)
+                        .map((af) => {
+                          const acSpec = getAircraftLocalized(af.selectedAircraftId, lang);
+                          const mSpec = getMunitionLocalized(acSpec.missileId, lang);
+                          return (
+                            <button
+                              key={af.id}
+                              type="button"
+                              onClick={() => setFocusCoords({ lat: af.lat, lng: af.lng })}
+                              className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-[#0D1624] cursor-pointer"
+                            >
+                              <Plane className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-slate-100 truncate">
+                                    {af.name}
+                                  </span>
+                                  <span className="font-mono-tabular text-[10.5px] font-semibold text-rose-300 shrink-0">
+                                    {acSpec.shortName} · {af.salvoCount}× {mSpec.shortName}
+                                  </span>
+                                </div>
+                                <div className="mt-0.5 font-mono-tabular text-[10px] text-slate-400 truncate">
+                                  {t.airfieldBasePrefixRu} · {af.lat.toFixed(2)}, {af.lng.toFixed(2)}
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+
+                      {launchers
+                        .filter((l) => l.isAi)
+                        .map((l, idx) => {
+                          const spec = getMunitionLocalized(l.munitionId, lang);
+                          return (
+                            <button
+                              key={l.id}
+                              type="button"
+                              onClick={() => setFocusCoords({ lat: l.lat, lng: l.lng })}
+                              className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-[#0D1624] cursor-pointer"
+                            >
+                              <Crosshair className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-slate-100 truncate">
+                                    {l.isNavalShip ? t.shipLabel : t.launcherLabel} #{idx + 1} · {spec.shortName}
+                                  </span>
+                                  <span className="font-mono-tabular text-[10.5px] font-semibold text-rose-300 shrink-0">
+                                    {l.ammo}/{l.maxAmmo}
+                                  </span>
+                                </div>
+                                <div className="mt-0.5 font-mono-tabular text-[10px] text-slate-400 truncate">
+                                  {l.isNavalShip ? t.territorySea : t.territoryRu} · {l.lat.toFixed(2)}, {l.lng.toFixed(2)}
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                    </div>
                   </div>
                 )}
               </section>
@@ -3632,7 +4164,19 @@ export default function App() {
               {pendingShip ? (
                 <>
                   <span className="font-medium">
-                    Установка <strong className="text-sky-300">корабля ВМФ РФ</strong> (8× КР «Калибр») — нажмите на Чёрное или Азовское море
+                    {lang === 'uk' ? (
+                      <>
+                        Розміщення <strong className="text-sky-300">корабля ВМФ РФ</strong> (8× КР «Калібр») — натисніть на Чорне або Азовське море
+                      </>
+                    ) : lang === 'en' ? (
+                      <>
+                        Deploying <strong className="text-sky-300">RU Navy Ship</strong> (8× Kalibr) — click Black or Azov Sea
+                      </>
+                    ) : (
+                      <>
+                        Установка <strong className="text-sky-300">корабля ВМФ РФ</strong> (8× КР «Калибр») — нажмите на Чёрное или Азовское море
+                      </>
+                    )}
                   </span>
                   <button
                     type="button"
@@ -3642,13 +4186,25 @@ export default function App() {
                     }}
                     className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Отмена
+                    {t.cancelBtn}
                   </button>
                 </>
               ) : pendingAirfield ? (
                 <>
                   <span className="font-medium">
-                    Установка <strong className="text-amber-300">аэродрома ВКС РФ</strong> — нажмите на территорию РФ или оккуп. зону
+                    {lang === 'uk' ? (
+                      <>
+                        Розміщення <strong className="text-amber-300">аеродрому ПКС РФ</strong> — натисніть на територію РФ або окуп. зону
+                      </>
+                    ) : lang === 'en' ? (
+                      <>
+                        Deploying <strong className="text-amber-300">RU Airbase</strong> — click RU or occupied territory
+                      </>
+                    ) : (
+                      <>
+                        Установка <strong className="text-amber-300">аэродрома ВКС РФ</strong> — нажмите на территорию РФ или оккуп. зону
+                      </>
+                    )}
                   </span>
                   <button
                     type="button"
@@ -3658,13 +4214,25 @@ export default function App() {
                     }}
                     className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Отмена
+                    {t.cancelBtn}
                   </button>
                 </>
               ) : pendingAirfieldUa ? (
                 <>
                   <span className="font-medium">
-                    Установка <strong className="text-sky-300">аэродрома ВСУ</strong> — нажмите на подконтрольную территорию Украины
+                    {lang === 'uk' ? (
+                      <>
+                        Розміщення <strong className="text-sky-300">аеродрому ЗСУ</strong> — натисніть на підконтрольну територію України
+                      </>
+                    ) : lang === 'en' ? (
+                      <>
+                        Deploying <strong className="text-sky-300">UA Airbase</strong> — click UA-controlled territory
+                      </>
+                    ) : (
+                      <>
+                        Установка <strong className="text-sky-300">аэродрома ВСУ</strong> — нажмите на подконтрольную территорию Украины
+                      </>
+                    )}
                   </span>
                   <button
                     type="button"
@@ -3674,42 +4242,60 @@ export default function App() {
                     }}
                     className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Отмена
+                    {t.cancelBtn}
                   </button>
                 </>
               ) : pendingStrikeSpec ? (
                 <>
                   <span className="font-medium">
-                    Установка{' '}
+                    {lang === 'uk' ? 'Розміщення' : lang === 'en' ? 'Deploying' : 'Установка'}{' '}
                     <strong
                       className={
                         pendingStrikeSpec.faction === 'UA' ? 'text-sky-300' : 'text-amber-300'
                       }
                     >
-                      {pendingStrikeSpec.launcherName}
+                      {lang === 'ru' ? pendingStrikeSpec.launcherName : pendingStrikeSpec.name}
                     </strong>{' '}
                     <span className="text-rose-300 font-mono-tabular">
                       (-{pendingStrikeSpec.damage} HP)
                     </span>{' '}
                     —{' '}
                     {pendingStrikeSpec.faction === 'UA'
-                      ? 'нажмите на подконтрольную территорию Украины'
-                      : 'нажмите на РФ или оккуп. территорию'}
+                      ? t.clickControlledUa
+                      : t.clickRuOrOccupied}
                   </span>
                   <button
                     type="button"
                     onClick={() => setPendingPlacement(null)}
                     className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Отмена
+                    {t.cancelBtn}
                   </button>
                 </>
               ) : pendingPvoSpec ? (
                 <>
                   <span className="font-medium">
                     {pendingPvoSpec.isRadar ? (
+                      lang === 'uk' ? (
+                        <>
+                          Розміщення <strong className="text-cyan-300">{pendingPvoSpec.name}</strong> (огляд {pendingPvoSpec.rangeKm} км, +45% до ППО) — натисніть на мапу
+                        </>
+                      ) : lang === 'en' ? (
+                        <>
+                          Deploying <strong className="text-cyan-300">{pendingPvoSpec.name}</strong> (scan {pendingPvoSpec.rangeKm} km, +45% ADS) — click map
+                        </>
+                      ) : (
+                        <>
+                          Установка <strong className="text-cyan-300">{pendingPvoSpec.name}</strong> (обзор {pendingPvoSpec.rangeKm} км, +45% к ППО) — нажмите на карту
+                        </>
+                      )
+                    ) : lang === 'uk' ? (
                       <>
-                        Установка <strong className="text-cyan-300">{pendingPvoSpec.name}</strong> (обзор {pendingPvoSpec.rangeKm} км, +45% к ППО) — нажмите на карту
+                        Розміщення ППО <strong className="text-emerald-300">{pendingPvoSpec.name}</strong> (радіус {pendingPvoSpec.rangeKm} км) — натисніть на мапу
+                      </>
+                    ) : lang === 'en' ? (
+                      <>
+                        Deploying ADS <strong className="text-emerald-300">{pendingPvoSpec.name}</strong> (range {pendingPvoSpec.rangeKm} km) — click map
                       </>
                     ) : (
                       <>
@@ -3722,28 +4308,34 @@ export default function App() {
                     onClick={() => setPendingPlacement(null)}
                     className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Отмена
+                    {t.cancelBtn}
                   </button>
                 </>
               ) : pendingInfraSpec ? (
                 <>
                   <span className="font-medium">
-                    Установка <strong style={{ color: pendingInfraSpec.accentColor }}>{pendingInfraSpec.name}</strong>{' '}
-                    <span className="text-emerald-300 font-mono-tabular">({pendingInfraSpec.maxHp} HP)</span> — нажмите на карту
+                    {lang === 'uk' ? 'Розміщення' : lang === 'en' ? 'Deploying' : 'Установка'}{' '}
+                    <strong style={{ color: pendingInfraSpec.accentColor }}>{pendingInfraSpec.name}</strong>{' '}
+                    <span className="text-emerald-300 font-mono-tabular">({pendingInfraSpec.maxHp} HP)</span> —{' '}
+                    {lang === 'uk'
+                      ? 'натисніть на мапу'
+                      : lang === 'en'
+                        ? 'click map'
+                        : 'нажмите на карту'}
                   </span>
                   <button
                     type="button"
                     onClick={() => setPendingPlacement(null)}
                     className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Отмена
+                    {t.cancelBtn}
                   </button>
                 </>
               ) : selectedFlight ? (
                 (() => {
                   const fltName = selectedFlight.carrierAircraftId
-                    ? RUSSIAN_AIRCRAFT_BY_ID[selectedFlight.carrierAircraftId].shortName
-                    : MUNITION_BY_ID[selectedFlight.munitionId].shortName;
+                    ? getAircraftLocalized(selectedFlight.carrierAircraftId, lang).shortName
+                    : getMunitionLocalized(selectedFlight.munitionId, lang).shortName;
                   const fltAccent = selectedFlight.carrierAircraftId
                     ? RUSSIAN_AIRCRAFT_BY_ID[selectedFlight.carrierAircraftId].accentColor
                     : MUNITION_BY_ID[selectedFlight.munitionId].accentColor;
@@ -3758,26 +4350,52 @@ export default function App() {
                   );
                   const obsHeightLabel =
                     selectedFlight.altitudeMode === 'ultra-low'
-                      ? 'Очень низко (вне РЛС)'
+                      ? lang === 'uk'
+                        ? 'Дуже низько (поза РЛС)'
+                        : lang === 'en'
+                          ? 'Ultra-low (stealth)'
+                          : 'Очень низко (вне РЛС)'
                       : selectedFlight.altitudeMode === 'low'
-                        ? 'Низко (РЛС)'
-                        : 'Обычная';
+                        ? lang === 'uk'
+                          ? 'Низько (РЛС)'
+                          : lang === 'en'
+                            ? 'Low (Radar)'
+                            : 'Низко (РЛС)'
+                        : lang === 'uk'
+                          ? 'Звичайна'
+                          : lang === 'en'
+                            ? 'Normal'
+                            : 'Обычная';
                   const altLabel =
                     selectedFlight.altitudeMode === 'ultra-low'
-                      ? ' · Очень низко (вне РЛС)'
+                      ? lang === 'uk'
+                        ? ' · Дуже низько (поза РЛС)'
+                        : lang === 'en'
+                          ? ' · Ultra-low (stealth)'
+                          : ' · Очень низко (вне РЛС)'
                       : selectedFlight.altitudeMode === 'low'
-                        ? ' · Низко (РЛС)'
+                        ? lang === 'uk'
+                          ? ' · Низько (РЛС)'
+                          : lang === 'en'
+                            ? ' · Low (Radar)'
+                            : ' · Низко (РЛС)'
                         : '';
+                  const altOptNormal = lang === 'uk' ? 'Звичайна' : lang === 'en' ? 'Normal' : 'Обычная';
+                  const altOptLow = lang === 'uk' ? 'Низько' : lang === 'en' ? 'Low' : 'Низко';
+                  const altOptUltra = lang === 'uk' ? 'Дуже низько' : lang === 'en' ? 'Ultra-low' : 'Очень низко';
+                  const exitCamLabel = lang === 'uk' ? 'Вийти з камери' : lang === 'en' ? 'Exit Cam' : 'Выйти из камеры';
+                  const deselectLabel = lang === 'uk' ? 'Зняти вибір' : lang === 'en' ? 'Deselect' : 'Снять выбор';
+
                   if (isAiReadOnly) {
                     return (
                       <>
                         <span className="font-medium flex items-center gap-1.5">
                           <Eye className="h-3.5 w-3.5 text-sky-300 shrink-0" />
                           <span>
-                            Наблюдение ИИ:{' '}
+                            {lang === 'uk' ? 'Спостереження ШІ:' : lang === 'en' ? 'AI Track:' : 'Наблюдение ИИ:'}{' '}
                             <strong style={{ color: fltAccent }}>{fltName}</strong>{' '}
                             <span className="font-mono-tabular text-slate-300">
-                              (~{Math.round(selectedFlight.remainingKm)} км · Высота: {obsHeightLabel})
+                              (~{Math.round(selectedFlight.remainingKm)} {t.kmShort} · {lang === 'uk' ? 'Висота' : lang === 'en' ? 'Alt' : 'Высота'}: {obsHeightLabel})
                             </span>
                           </span>
                         </span>
@@ -3791,7 +4409,7 @@ export default function App() {
                             }}
                             className="rounded border border-sky-400/60 bg-sky-500/15 hover:bg-sky-500/25 px-2.5 py-1 text-[11px] font-semibold text-sky-200 whitespace-nowrap shrink-0 cursor-pointer"
                           >
-                            Выйти из камеры
+                            {exitCamLabel}
                           </button>
                         )}
 
@@ -3809,7 +4427,7 @@ export default function App() {
                           }}
                           className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          Снять выбор
+                          {deselectLabel}
                         </button>
                       </>
                     );
@@ -3819,7 +4437,7 @@ export default function App() {
                       <span className="font-medium flex items-center gap-1.5">
                         <Navigation className="h-3.5 w-3.5 text-amber-300 shrink-0" />
                         <span>
-                          Новый курс (<strong style={{ color: fltAccent }}>{fltName}</strong>) · Точек:{' '}
+                          {lang === 'uk' ? 'Новий курс' : lang === 'en' ? 'New course' : 'Новый курс'} (<strong style={{ color: fltAccent }}>{fltName}</strong>) · {lang === 'uk' ? 'Точок' : lang === 'en' ? 'Points' : 'Точек'}:{' '}
                           <strong className="font-mono-tabular text-white">
                             {flightRouteWaypoints.length}
                           </strong>
@@ -3836,7 +4454,7 @@ export default function App() {
                         className="flex items-center gap-1 rounded bg-amber-500 hover:bg-amber-400 disabled:opacity-45 disabled:pointer-events-none px-2.5 py-1 text-[11px] font-semibold text-slate-950 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Play className="h-3 w-3" />
-                        <span>Применить курс</span>
+                        <span>{lang === 'uk' ? 'Застосувати курс' : lang === 'en' ? 'Apply Course' : 'Применить курс'}</span>
                       </button>
 
                       <button
@@ -3849,7 +4467,7 @@ export default function App() {
                         className="flex items-center gap-1 rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 disabled:opacity-40 disabled:pointer-events-none px-2 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Undo2 className="h-3 w-3" />
-                        <span>Назад</span>
+                        <span>{t.back}</span>
                       </button>
 
                       <button
@@ -3861,7 +4479,7 @@ export default function App() {
                         }}
                         className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Отмена
+                        {t.cancelBtn}
                       </button>
                     </>
                   ) : (
@@ -3869,31 +4487,39 @@ export default function App() {
                       <span className="font-medium flex items-center gap-1.5">
                         <Navigation className="h-3.5 w-3.5 text-sky-300 shrink-0" />
                         <span>
-                          Цель в воздухе:{' '}
+                          {lang === 'uk' ? 'Ціль у повітрі:' : lang === 'en' ? 'Airborne Track:' : 'Цель в воздухе:'}{' '}
                           <strong style={{ color: fltAccent }}>{fltName}</strong>{' '}
                           <span className="font-mono-tabular text-slate-400">
-                            (~{Math.round(selectedFlight.remainingKm)} км{altLabel})
+                            (~{Math.round(selectedFlight.remainingKm)} {t.kmShort}{altLabel})
                           </span>
                           {isSteerable ? (
                             <span className="ml-1.5 text-cyan-300">
-                              · <kbd className="font-mono-tabular text-white">←</kbd>/<kbd className="font-mono-tabular text-white">→</kbd> или{' '}
+                              · <kbd className="font-mono-tabular text-white">←</kbd>/<kbd className="font-mono-tabular text-white">→</kbd>{' '}
+                              {lang === 'uk' ? 'або' : lang === 'en' ? 'or' : 'или'}{' '}
                               <kbd className="font-mono-tabular text-white">A</kbd>/<kbd className="font-mono-tabular text-white">D</kbd> ·{' '}
-                              <kbd className="font-mono-tabular text-white">Пробел</kbd> подрыв
+                              <kbd className="font-mono-tabular text-white">{lang === 'en' ? 'Space' : lang === 'uk' ? 'Пробіл' : 'Пробел'}</kbd>{' '}
+                              {lang === 'uk' ? 'підрив' : lang === 'en' ? 'detonate' : 'подрыв'}
                             </span>
                           ) : (
-                            ' — кликните на карту для смены курса'
+                            lang === 'uk'
+                              ? ' — натисніть на мапу для зміни курсу'
+                              : lang === 'en'
+                                ? ' — click map to redirect'
+                                : ' — кликните на карту для смены курса'
                           )}
                         </span>
                       </span>
 
                       {canAdjustAlt && (
                         <div className="flex items-center gap-1 rounded border border-slate-700 bg-[#080D16] px-1.5 py-0.5 shrink-0">
-                          <span className="text-[10px] text-slate-400 mr-0.5">Высота:</span>
+                          <span className="text-[10px] text-slate-400 mr-0.5">
+                            {lang === 'uk' ? 'Висота:' : lang === 'en' ? 'Alt:' : 'Высота:'}
+                          </span>
                           {(
                             [
-                              { id: 'normal', label: 'Обычная' },
-                              { id: 'low', label: 'Низко' },
-                              { id: 'ultra-low', label: 'Очень низко' },
+                              { id: 'normal', label: altOptNormal },
+                              { id: 'low', label: altOptLow },
+                              { id: 'ultra-low', label: altOptUltra },
                             ] as Array<{ id: AltitudeMode; label: string }>
                           ).map((opt) => {
                             const curAlt: AltitudeMode =
@@ -3937,7 +4563,7 @@ export default function App() {
                           }}
                           className="rounded border border-sky-400/60 bg-sky-500/15 hover:bg-sky-500/25 px-2.5 py-1 text-[11px] font-semibold text-sky-200 whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          Выйти из камеры
+                          {exitCamLabel}
                         </button>
                       )}
 
@@ -3947,7 +4573,7 @@ export default function App() {
                           onClick={() => setDetonateFlightSignal((n) => n + 1)}
                           className="rounded border border-rose-500/65 bg-rose-500/20 hover:bg-rose-500/30 px-2.5 py-1 text-[11px] font-semibold text-rose-200 whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          Подрыв сейчас
+                          {lang === 'uk' ? 'Підрив зараз' : lang === 'en' ? 'Detonate Now' : 'Подрыв сейчас'}
                         </button>
                       )}
 
@@ -3961,7 +4587,7 @@ export default function App() {
                         className="flex items-center gap-1 rounded border border-amber-400/60 bg-amber-500/15 hover:bg-amber-500/25 px-2.5 py-1 text-[11px] font-semibold text-amber-200 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Route className="h-3.5 w-3.5" />
-                        <span>Маршрут по точкам</span>
+                        <span>{lang === 'uk' ? 'Маршрут по точках' : lang === 'en' ? 'Waypoint Route' : 'Маршрут по точкам'}</span>
                       </button>
 
                       <button
@@ -3978,7 +4604,7 @@ export default function App() {
                         }}
                         className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Снять выбор
+                        {deselectLabel}
                       </button>
                     </>
                   );
@@ -3987,19 +4613,21 @@ export default function App() {
                 isPlottingRoute ? (
                   <>
                     <span className="font-medium">
-                      Маршрут (<strong style={{ color: selectedSpec.accentColor }}>{selectedSpec.shortName}</strong> ·{' '}
-                      <span className="text-rose-300 font-mono-tabular">-{selectedSpec.damage} HP</span>) · Точек:{' '}
+                      {lang === 'en' ? 'Route' : 'Маршрут'} (<strong style={{ color: selectedSpec.accentColor }}>{selectedSpec.shortName}</strong> ·{' '}
+                      <span className="text-rose-300 font-mono-tabular">-{selectedSpec.damage} HP</span>) · {lang === 'uk' ? 'Точок' : lang === 'en' ? 'Points' : 'Точек'}:{' '}
                       <strong className="font-mono-tabular text-white">{routeWaypoints.length}</strong>
                     </span>
 
                     {selectedLauncher.ammo > 1 && (
                       <div className="flex items-center gap-1 rounded border border-slate-700 bg-[#080D16] px-1.5 py-0.5">
-                        <span className="text-[11px] text-slate-400 mr-0.5">Целей:</span>
+                        <span className="text-[11px] text-slate-400 mr-0.5">
+                          {lang === 'uk' ? 'Цілей:' : lang === 'en' ? 'Salvo:' : 'Целей:'}
+                        </span>
                         <button
                           type="button"
                           onClick={() => setRouteLaunchCount((c) => Math.max(1, c - 1))}
                           disabled={effectiveRouteLaunchCount <= 1}
-                          aria-label="Уменьшить количество целей"
+                          aria-label="-"
                           className="flex h-5 w-5 items-center justify-center rounded-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-35 text-slate-200 cursor-pointer"
                         >
                           <Minus className="h-3 w-3" />
@@ -4013,7 +4641,7 @@ export default function App() {
                             setRouteLaunchCount((c) => Math.min(selectedLauncher.ammo, c + 1))
                           }
                           disabled={effectiveRouteLaunchCount >= selectedLauncher.ammo}
-                          aria-label="Увеличить количество целей"
+                          aria-label="+"
                           className="flex h-5 w-5 items-center justify-center rounded-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-35 text-slate-200 cursor-pointer"
                         >
                           <Plus className="h-3 w-3" />
@@ -4027,21 +4655,18 @@ export default function App() {
                               : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
                           }`}
                         >
-                          Все
+                          {t.filterAll}
                         </button>
                       </div>
                     )}
 
                     {selectedSpec.canFlyLow && (
-                      <div
-                        className="flex items-center rounded border border-slate-700 bg-[#080D16] divide-x divide-slate-800 overflow-hidden shrink-0"
-                        title="Высота полёта дрона: Обычная (виден всегда) · Низко (виден в зоне РЛС) · Очень низко (невидим даже для радаров)"
-                      >
+                      <div className="flex items-center rounded border border-slate-700 bg-[#080D16] divide-x divide-slate-800 overflow-hidden shrink-0">
                         {(
                           [
-                            { id: 'normal', label: 'Обычная' },
-                            { id: 'low', label: 'Низко' },
-                            { id: 'ultra-low', label: 'Очень низко' },
+                            { id: 'normal', label: lang === 'uk' ? 'Звичайна' : lang === 'en' ? 'Normal' : 'Обычная' },
+                            { id: 'low', label: lang === 'uk' ? 'Низько' : lang === 'en' ? 'Low' : 'Низко' },
+                            { id: 'ultra-low', label: lang === 'uk' ? 'Дуже низько' : lang === 'en' ? 'Ultra-low' : 'Очень низко' },
                           ] as const
                         ).map((opt) => (
                           <button
@@ -4073,8 +4698,12 @@ export default function App() {
                       <Play className="h-3 w-3" />
                       <span>
                         {effectiveRouteLaunchCount > 1
-                          ? `Запустить (×${effectiveRouteLaunchCount})`
-                          : 'Запустить по маршруту'}
+                          ? `${lang === 'uk' ? 'Запустити' : lang === 'en' ? 'Launch' : 'Запустить'} (×${effectiveRouteLaunchCount})`
+                          : lang === 'uk'
+                            ? 'Запустити за маршрутом'
+                            : lang === 'en'
+                              ? 'Launch Route'
+                              : 'Запустить по маршруту'}
                       </span>
                     </button>
 
@@ -4085,7 +4714,7 @@ export default function App() {
                       className="flex items-center gap-1 rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 disabled:opacity-40 disabled:pointer-events-none px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       <Undo2 className="h-3 w-3" />
-                      <span>Назад</span>
+                      <span>{t.back}</span>
                     </button>
 
                     <button
@@ -4097,7 +4726,7 @@ export default function App() {
                       }}
                       className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      Отмена
+                      {t.cancelBtn}
                     </button>
                   </>
                 ) : (
@@ -4105,54 +4734,79 @@ export default function App() {
                     <span className="font-medium">
                       {selectedLauncher.ammo > 0 ? (
                         selectedSpec.id === 'airstrike' ? (
-                          <>
-                            Авиаудар (
-                            <strong style={{ color: selectedSpec.accentColor }}>
-                              1 вылет · 6 бомб · -{selectedSpec.damage} HP/бомба
-                            </strong>
-                            ) — выберите цель или проложите маршрут
-                          </>
+                          lang === 'uk' ? (
+                            <>
+                              Авіаудар (<strong style={{ color: selectedSpec.accentColor }}>1 виліт · 6 бомб · -{selectedSpec.damage} HP</strong>) — оберіть ціль або прокладіть маршрут
+                            </>
+                          ) : lang === 'en' ? (
+                            <>
+                              Airstrike (<strong style={{ color: selectedSpec.accentColor }}>1 sortie · 6 bombs · -{selectedSpec.damage} HP</strong>) — pick target or plot route
+                            </>
+                          ) : (
+                            <>
+                              Авиаудар (<strong style={{ color: selectedSpec.accentColor }}>1 вылет · 6 бомб · -{selectedSpec.damage} HP/бомба</strong>) — выберите цель или проложите маршрут
+                            </>
+                          )
                         ) : selectedSpec.id === 'su57-kab' ? (
                           su57DropPoint ? (
                             <>
-                              Су-57 → точка сброса задана ·{' '}
+                              {lang === 'en' ? 'Su-57 → drop point set' : 'Су-57 → точка сброса задана'} ·{' '}
                               <strong className="text-rose-300">
-                                Шаг 2: выберите цель в радиусе {selectedSpec.kabMaxRangeKm} км
+                                {lang === 'uk'
+                                  ? `Крок 2: оберіть ціль у радіусі ${selectedSpec.kabMaxRangeKm} км`
+                                  : lang === 'en'
+                                    ? `Step 2: select target within ${selectedSpec.kabMaxRangeKm} km`
+                                    : `Шаг 2: выберите цель в радиусе ${selectedSpec.kabMaxRangeKm} км`}
                               </strong>
                             </>
                           ) : (
                             <>
-                              Су-57 (
+                              {lang === 'en' ? 'Su-57' : 'Су-57'} (
                               <strong style={{ color: selectedSpec.accentColor }}>
                                 {selectedLauncher.ammo}/{selectedLauncher.maxAmmo} · -{selectedSpec.damage} HP
                               </strong>
-                              ) — Шаг 1: точка сброса КАБ на карте
+                              ) —{' '}
+                              {lang === 'uk'
+                                ? 'Крок 1: точка скидання КАБ на мапі'
+                                : lang === 'en'
+                                  ? 'Step 1: set KAB drop point on map'
+                                  : 'Шаг 1: точка сброса КАБ на карте'}
                             </>
                           )
                         ) : selectedSpec.id === 'kab' ? (
                           <>
-                            КАБ УМПК (
+                            {selectedSpec.shortName} (
                             <strong style={{ color: selectedSpec.accentColor }}>
-                              {selectedLauncher.ammo}/{selectedLauncher.maxAmmo} · ≤{selectedSpec.maxRangeKm} км
+                              {selectedLauncher.ammo}/{selectedLauncher.maxAmmo} · ≤{selectedSpec.maxRangeKm} {t.kmShort}
                             </strong>
-                            ) — выберите цель внутри красного кольца
+                            ) —{' '}
+                            {lang === 'uk'
+                              ? 'оберіть ціль усередині червоного кільця'
+                              : lang === 'en'
+                                ? 'select target inside red ring'
+                                : 'выберите цель внутри красного кольца'}
                           </>
                         ) : (
                           <>
-                            ПУ (
+                            {t.launcherLabel} (
                             <strong style={{ color: selectedSpec.accentColor }}>
                               {selectedSpec.shortName} · {selectedLauncher.ammo}/{selectedLauncher.maxAmmo}
                             </strong>{' '}
-                            · <span className="text-rose-300 font-mono-tabular">-{selectedSpec.damage} HP</span>) — выберите цель или маршрут
+                            · <span className="text-rose-300 font-mono-tabular">-{selectedSpec.damage} HP</span>) —{' '}
+                            {lang === 'uk'
+                              ? 'оберіть ціль або маршрут'
+                              : lang === 'en'
+                                ? 'click target or plot route'
+                                : 'выберите цель или маршрут'}
                           </>
                         )
                       ) : (
                         <>
-                          Боекомплект (
+                          {t.ammoShort} (
                           <strong className="text-red-400">
                             {selectedSpec.shortName} · 0/{selectedLauncher.maxAmmo}
                           </strong>
-                          ) исчерпан
+                          ) — {t.ammoEmpty}
                         </>
                       )}
                     </span>
@@ -4163,20 +4817,17 @@ export default function App() {
                         onClick={() => setSu57DropPoint(null)}
                         className="rounded border border-sky-400/50 bg-sky-500/15 hover:bg-sky-500/25 px-2.5 py-1 text-[11px] font-medium text-sky-200 whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Сбросить точку
+                        {lang === 'uk' ? 'Скинути точку' : lang === 'en' ? 'Reset Point' : 'Сбросить точку'}
                       </button>
                     )}
 
                     {selectedSpec.canFlyLow && selectedLauncher.ammo > 0 && (
-                      <div
-                        className="flex items-center rounded border border-slate-700 bg-[#080D16] divide-x divide-slate-800 overflow-hidden shrink-0"
-                        title="Высота полёта дрона: Обычная (виден всегда) · Низко (виден в зоне РЛС) · Очень низко (невидим даже для радаров)"
-                      >
+                      <div className="flex items-center rounded border border-slate-700 bg-[#080D16] divide-x divide-slate-800 overflow-hidden shrink-0">
                         {(
                           [
-                            { id: 'normal', label: 'Обычная' },
-                            { id: 'low', label: 'Низко' },
-                            { id: 'ultra-low', label: 'Очень низко' },
+                            { id: 'normal', label: lang === 'uk' ? 'Звичайна' : lang === 'en' ? 'Normal' : 'Обычная' },
+                            { id: 'low', label: lang === 'uk' ? 'Низько' : lang === 'en' ? 'Low' : 'Низко' },
+                            { id: 'ultra-low', label: lang === 'uk' ? 'Дуже низько' : lang === 'en' ? 'Ultra-low' : 'Очень низко' },
                           ] as const
                         ).map((opt) => (
                           <button
@@ -4211,7 +4862,7 @@ export default function App() {
                         className="flex items-center gap-1.5 rounded border border-amber-400/60 bg-amber-500/15 hover:bg-amber-500/25 px-2.5 py-1 text-[11px] font-semibold text-amber-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Route className="h-3.5 w-3.5" />
-                        <span>Проложить маршрут</span>
+                        <span>{lang === 'uk' ? 'Прокласти маршрут' : lang === 'en' ? 'Plot Route' : 'Проложить маршрут'}</span>
                       </button>
                     )}
 
@@ -4223,14 +4874,14 @@ export default function App() {
                       }}
                       className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      Снять выбор
+                      {lang === 'uk' ? 'Зняти вибір' : lang === 'en' ? 'Deselect' : 'Снять выбор'}
                     </button>
                   </>
                 )
               ) : selectedAirfield && selectedAircraftSpec && selectedAircraftMissileSpec ? (
                 <>
                   <span className="font-medium">
-                    {selectedAirfield.faction === 'UA' ? 'Аэродром ВСУ' : 'Аэродром'}{' '}
+                    {selectedAirfield.faction === 'UA' ? t.airfieldBasePrefixUa : t.airfieldBasePrefixRu}{' '}
                     <strong className={selectedAirfield.faction === 'UA' ? 'text-sky-300' : 'text-amber-300'}>
                       {selectedAirfield.name}
                     </strong>{' '}
@@ -4241,10 +4892,20 @@ export default function App() {
                     ({selectedAirfield.salvoCount}× {selectedAircraftMissileSpec.shortName}){' '}
                     {airfieldLaunchPoint ? (
                       <strong className="text-rose-300">
-                        — Шаг 2: маршрут ракет ({airfieldMissileWaypoints.length} т.)
+                        {lang === 'uk'
+                          ? `— Крок 2: маршрут ракет (${airfieldMissileWaypoints.length} т.)`
+                          : lang === 'en'
+                            ? `— Step 2: missile route (${airfieldMissileWaypoints.length} pts)`
+                            : `— Шаг 2: маршрут ракет (${airfieldMissileWaypoints.length} т.)`}
                       </strong>
                     ) : (
-                      <span>— Шаг 1: точка пуска самолёта на карте</span>
+                      <span>
+                        {lang === 'uk'
+                          ? '— Крок 1: точка пуску літака на мапі'
+                          : lang === 'en'
+                            ? '— Step 1: set aircraft launch point on map'
+                            : '— Шаг 1: точка пуска самолёта на карте'}
+                      </span>
                     )}
                   </span>
 
@@ -4254,7 +4915,7 @@ export default function App() {
                     className="flex items-center gap-1.5 rounded border border-amber-400/55 bg-amber-500/15 hover:bg-amber-500/25 px-2.5 py-1 text-[11px] font-semibold text-amber-200 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Plane className="h-3.5 w-3.5" />
-                    <span>Самолёт и ракеты</span>
+                    <span>{lang === 'uk' ? 'Літак і ракети' : lang === 'en' ? 'Aircraft & Loadout' : 'Самолёт и ракеты'}</span>
                   </button>
 
                   {airfieldLaunchPoint && (
@@ -4266,7 +4927,7 @@ export default function App() {
                         className="flex items-center gap-1.5 rounded bg-amber-500 hover:bg-amber-400 disabled:opacity-45 disabled:pointer-events-none px-3 py-1 text-[11px] font-semibold text-slate-950 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Play className="h-3 w-3" />
-                        <span>Запустить</span>
+                        <span>{lang === 'uk' ? 'Запустити' : lang === 'en' ? 'Launch' : 'Запустить'}</span>
                       </button>
 
                       <button
@@ -4276,7 +4937,7 @@ export default function App() {
                         className="flex items-center gap-1 rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 disabled:opacity-40 disabled:pointer-events-none px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Undo2 className="h-3 w-3" />
-                        <span>Назад</span>
+                        <span>{t.back}</span>
                       </button>
 
                       <button
@@ -4287,7 +4948,7 @@ export default function App() {
                         }}
                         className="rounded border border-sky-400/50 bg-sky-500/15 hover:bg-sky-500/25 px-2.5 py-1 text-[11px] font-medium text-sky-200 whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Изменить точку
+                        {lang === 'uk' ? 'Змінити точку' : lang === 'en' ? 'Reset Point' : 'Изменить точку'}
                       </button>
                     </>
                   )}
@@ -4302,7 +4963,7 @@ export default function App() {
                     }}
                     className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Снять выбор
+                    {lang === 'uk' ? 'Зняти вибір' : lang === 'en' ? 'Deselect' : 'Снять выбор'}
                   </button>
                 </>
               ) : gameMode === 'ai' ? (
@@ -4310,17 +4971,33 @@ export default function App() {
                   <Timer className="h-3.5 w-3.5 text-sky-400 shrink-0" />
                   <span>
                     {aiWaveNumber === 0
-                      ? `Подготовка: первая волна ИИ через ${Math.ceil(aiWaveCountdownSec)} с · Разместите Радар ПВО и ППО`
-                      : `Волна #${aiWaveNumber} · Следующая через ${Math.ceil(aiWaveCountdownSec)} с · ПКМ по ППО — продать за 50%`}
+                      ? lang === 'uk'
+                        ? `Підготовка: перша хвиля ШІ через ${Math.ceil(aiWaveCountdownSec)} с · Розмістіть Радар ППО та ППО`
+                        : lang === 'en'
+                          ? `Prep: first AI wave in ${Math.ceil(aiWaveCountdownSec)} s · Deploy Radar & ADS`
+                          : `Подготовка: первая волна ИИ через ${Math.ceil(aiWaveCountdownSec)} с · Разместите Радар ПВО и ППО`
+                      : lang === 'uk'
+                        ? `Хвиля #${aiWaveNumber} · Наступна через ${Math.ceil(aiWaveCountdownSec)} с · Завдавайте ударів по цілях ШІ`
+                        : lang === 'en'
+                          ? `Wave #${aiWaveNumber} · Next in ${Math.ceil(aiWaveCountdownSec)} s · Strike AI targets`
+                          : `Волна #${aiWaveNumber} · Следующая через ${Math.ceil(aiWaveCountdownSec)} с · Наводите удары по целям ИИ`}
                   </span>
                 </div>
               ) : launchers.length > 0 || airfields.length > 0 ? (
                 <span className="text-slate-300">
-                  Нажмите на ПУ, аэродром или летящую цель на карте, чтобы изменить маршрут в любой момент
+                  {lang === 'uk'
+                    ? 'Натисніть на ПУ, аеродром або ціль у повітрі, щоб змінити маршрут у будь-який момент'
+                    : lang === 'en'
+                      ? 'Click any launcher, airbase, or airborne target on the map to adjust its course anytime'
+                      : 'Нажмите на ПУ, аэродром или летящую цель на карте, чтобы изменить маршрут в любой момент'}
                 </span>
               ) : (
                 <span className="text-slate-300">
-                  Выберите БПЛА, ракету, аэродром или ППО слева и установите на карту
+                  {lang === 'uk'
+                    ? 'Оберіть БПЛА, ракету, аеродром або ППО ліворуч і встановіть на мапу'
+                    : lang === 'en'
+                      ? 'Select a UAV, missile, airbase, or ADS on the left and place it on the map'
+                      : 'Выберите БПЛА, ракету, аэродром или ППО слева и установите на карту'}
                 </span>
               )}
             </div>
@@ -4346,12 +5023,20 @@ export default function App() {
                           selectedAirfield.faction === 'UA' ? 'text-sky-300' : 'text-amber-300'
                         }`}
                       >
-                        {selectedAirfield.faction === 'UA' ? 'Аэродром ВСУ' : 'Аэродром'} «{selectedAirfield.name}»
+                        {selectedAirfield.faction === 'UA' ? t.airfieldBasePrefixUa : t.airfieldBasePrefixRu} «{selectedAirfield.name}»
                       </div>
                       <h3 className="text-sm font-semibold text-slate-100 truncate">
                         {airfieldModalStep === 'aircraft'
-                          ? 'Выберите самолёт'
-                          : `${selectedAircraftSpec.name} — Сколько ${selectedAircraftSpec.missileId === 'aasm-hammer' ? 'бомб' : 'ракет'}?`}
+                          ? lang === 'uk'
+                            ? 'Оберіть літак'
+                            : lang === 'en'
+                              ? 'Select Aircraft'
+                              : 'Выберите самолёт'
+                          : `${selectedAircraftSpec.name} — ${
+                              selectedAircraftSpec.missileId === 'aasm-hammer'
+                                ? t.howManyBombs
+                                : t.howManyMissiles
+                            }`}
                       </h3>
                     </div>
 
@@ -4362,13 +5047,13 @@ export default function App() {
                           onClick={() => setAirfieldModalStep('aircraft')}
                           className="rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 px-2.5 py-1 text-[11px] font-medium text-slate-200 cursor-pointer"
                         >
-                          ← Самолёты
+                          {t.boardsBack}
                         </button>
                       )}
                       <button
                         type="button"
                         onClick={handleCancelAirfieldSelection}
-                        aria-label="Закрыть меню аэродрома"
+                        aria-label={t.cancelBtn}
                         className="flex h-7 w-7 items-center justify-center rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 text-slate-300 cursor-pointer"
                       >
                         <X className="h-3.5 w-3.5" />
@@ -4387,7 +5072,8 @@ export default function App() {
                             (ac) => ac.faction === (selectedAirfield.faction ?? 'RU'),
                           )
                       ).map((ac) => {
-                        const mSpec = MUNITION_BY_ID[ac.missileId];
+                        const locAc = getAircraftLocalized(ac.id, lang);
+                        const mSpec = getMunitionLocalized(ac.missileId, lang);
                         const isCurrent = selectedAirfield.selectedAircraftId === ac.id;
                         const isUa = selectedAirfield.faction === 'UA';
                         return (
@@ -4409,18 +5095,18 @@ export default function App() {
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-sm font-semibold text-slate-100 truncate">
-                                  {ac.name}
+                                  {locAc.name}
                                 </span>
                                 <span
                                   className={`font-mono-tabular text-[11px] font-semibold shrink-0 ${
                                     isUa ? 'text-sky-300' : 'text-amber-300'
                                   }`}
                                 >
-                                  до {ac.missileCount}× {mSpec.shortName}
+                                  {t.upToWord} {ac.missileCount}× {mSpec.shortName}
                                 </span>
                               </div>
                               <div className="mt-0.5 text-[11px] text-slate-400 truncate">
-                                {ac.role} · {ac.realSpeedKmh} км/ч · -{mSpec.damage} HP
+                                {locAc.role} · {ac.realSpeedKmh} {t.kmhShort} · -{mSpec.damage} HP
                               </div>
                             </div>
                           </button>
@@ -4441,16 +5127,20 @@ export default function App() {
                             {selectedAircraftMissileSpec.name}
                           </div>
                           <div className="mt-0.5 text-[11px] font-mono-tabular text-slate-400">
-                            -{selectedAircraftMissileSpec.damage} HP · {selectedAircraftMissileSpec.realSpeedKmh} км/ч
+                            -{selectedAircraftMissileSpec.damage} HP · {selectedAircraftMissileSpec.realSpeedKmh} {t.kmhShort}
                             {selectedAircraftMissileSpec.kabMaxRangeKm
-                              ? ` · ≤${selectedAircraftMissileSpec.kabMaxRangeKm} км`
+                              ? ` · ≤${selectedAircraftMissileSpec.kabMaxRangeKm} ${t.kmShort}`
                               : ''}
                           </div>
                         </div>
                       </div>
 
                       <div className="text-xs font-medium text-slate-300">
-                        Количество в залпе:
+                        {lang === 'uk'
+                          ? 'Кількість у залпі:'
+                          : lang === 'en'
+                            ? 'Salvo count:'
+                            : 'Количество в залпе:'}
                       </div>
 
                       <div className="grid grid-cols-2 gap-2">
@@ -4459,17 +5149,38 @@ export default function App() {
                           (_, idx) => idx + 1,
                         ).map((count) => {
                           const isBomb = selectedAircraftMissileSpec.id === 'aasm-hammer';
-                          const missileWord = isBomb
-                            ? count === 1
-                              ? 'бомба'
-                              : count >= 2 && count <= 4
-                                ? 'бомбы'
-                                : 'бомб'
-                            : count === 1
-                              ? 'ракета'
-                              : count >= 2 && count <= 4
-                                ? 'ракеты'
-                                : 'ракет';
+                          const missileWord =
+                            lang === 'en'
+                              ? isBomb
+                                ? count === 1
+                                  ? 'bomb'
+                                  : 'bombs'
+                                : count === 1
+                                  ? 'missile'
+                                  : 'missiles'
+                              : lang === 'uk'
+                                ? isBomb
+                                  ? count === 1
+                                    ? 'бомба'
+                                    : count >= 2 && count <= 4
+                                      ? 'бомби'
+                                      : 'бомб'
+                                  : count === 1
+                                    ? 'ракета'
+                                    : count >= 2 && count <= 4
+                                      ? 'ракети'
+                                      : 'ракет'
+                                : isBomb
+                                  ? count === 1
+                                    ? 'бомба'
+                                    : count >= 2 && count <= 4
+                                      ? 'бомбы'
+                                      : 'бомб'
+                                  : count === 1
+                                    ? 'ракета'
+                                    : count >= 2 && count <= 4
+                                      ? 'ракеты'
+                                      : 'ракет';
                           const totalDmg = count * selectedAircraftMissileSpec.damage;
                           const isSelectedCount = selectedAirfield.salvoCount === count;
                           const isUa = selectedAirfield.faction === 'UA';
@@ -4504,7 +5215,7 @@ export default function App() {
                                 </span>
                               </div>
                               <div className="mt-0.5 text-[11px] text-rose-300 font-mono-tabular">
-                                Суммарно -{totalDmg} HP
+                                {t.totalDmgLabel(totalDmg)}
                               </div>
                             </button>
                           );
@@ -4519,7 +5230,6 @@ export default function App() {
           {/* Right-Side Statistics & Event Log Drawer */}
           {eventDrawerOpen && (() => {
             const visibleJournalEntries = eventLog.filter((ev) => {
-              if (gameMode === 'ai' && ev.kind === 'launch') return false;
               if (journalFilter === 'all') return true;
               return ev.kind === journalFilter;
             });
@@ -4535,7 +5245,7 @@ export default function App() {
                     <BarChart3 className="h-4 w-4 text-sky-400 shrink-0" />
                     <div className="min-w-0">
                       <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-100 truncate">
-                        Оперативная сводка и ЖБД
+                        {t.statsDrawerTitle}
                       </h2>
                     </div>
                   </div>
@@ -4546,14 +5256,14 @@ export default function App() {
                       soundFx.playUiClick('back');
                       setEventDrawerOpen(false);
                     }}
-                    aria-label="Закрыть панель статистики"
+                    aria-label={t.cancelBtn}
                     className="flex h-7 w-7 items-center justify-center rounded border border-slate-800 bg-[#0E1726] hover:border-slate-700 text-slate-300 cursor-pointer shrink-0"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
 
-                {/* Tabs: Статистика | Журнал */}
+                {/* Tabs: Stats | Journal */}
                 <div className="grid grid-cols-2 border-b border-slate-800 bg-[#0A111C] divide-x divide-slate-800 shrink-0">
                   <button
                     type="button"
@@ -4568,7 +5278,7 @@ export default function App() {
                     }`}
                   >
                     <BarChart3 className="h-3.5 w-3.5" />
-                    <span>Сводка ППО</span>
+                    <span>{t.statsSummaryTab}</span>
                   </button>
                   <button
                     type="button"
@@ -4583,7 +5293,7 @@ export default function App() {
                     }`}
                   >
                     <ScrollText className="h-3.5 w-3.5" />
-                    <span>Журнал ({visibleJournalEntries.length})</span>
+                    <span>{t.journalTab} ({visibleJournalEntries.length})</span>
                   </button>
                 </div>
 
@@ -4593,10 +5303,10 @@ export default function App() {
                     <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-800/80 text-xs">
                       <div className="flex items-center gap-1.5 text-slate-400">
                         <Clock className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-                        <span>{formatSimClock(simTimeMinutes)}</span>
+                        <span>{formatSimClock(simTimeMinutes, lang)}</span>
                       </div>
                       <span className="font-mono-tabular text-[11px] text-slate-400">
-                        Темп {timeScale}×
+                        {t.tempoWord} {timeScale}×
                       </span>
                     </div>
 
@@ -4604,7 +5314,7 @@ export default function App() {
                     <div className="border border-slate-800/90 rounded bg-[#0A111C] p-3 space-y-2">
                       <div className="flex items-baseline justify-between gap-2">
                         <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
-                          Эффективность ППО
+                          {t.pvoEfficiency}
                         </span>
                         <span className="font-mono-tabular text-lg font-bold text-emerald-400">
                           {interceptAccuracyPct}%
@@ -4617,61 +5327,61 @@ export default function App() {
                         />
                       </div>
                       <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-400">
-                        <span>Перехвачено: <strong className="text-emerald-300">{stats.intercepts}</strong></span>
-                        <span>Промахи: <strong className="text-amber-300">{stats.misses}</strong></span>
+                        <span>{t.interceptedCount}: <strong className="text-emerald-300">{stats.intercepts}</strong></span>
+                        <span>{t.missesCount}: <strong className="text-amber-300">{stats.misses}</strong></span>
                       </div>
                     </div>
 
-                    {/* Key Combat Counters Grid (AI mode shows strictly own-side defense & damage telemetry) */}
+                    {/* Key Combat Counters Grid */}
                     {gameMode === 'ai' ? (
                       <div className="grid grid-cols-2 border border-slate-800/90 rounded overflow-hidden bg-[#0A111C] divide-x divide-y divide-slate-800/80">
                         <div className="p-2.5">
-                          <div className="text-[10.5px] text-slate-400">Волна обороны</div>
-                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-sky-300">
-                            #{aiWaveNumber}
+                          <div className="text-[10.5px] text-slate-400">{t.totalLaunches}</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-slate-100">
+                            {stats.totalLaunches}
                           </div>
                         </div>
                         <div className="p-2.5">
-                          <div className="text-[10.5px] text-slate-400">Сбито в воздухе</div>
+                          <div className="text-[10.5px] text-slate-400">{t.shotDownInAir}</div>
                           <div className="mt-0.5 font-mono-tabular text-lg font-bold text-emerald-300">
                             {stats.intercepts}
                           </div>
                         </div>
                         <div className="p-2.5">
-                          <div className="text-[10.5px] text-slate-400">Пропущено ударов</div>
+                          <div className="text-[10.5px] text-slate-400">{t.missedHits}</div>
                           <div className="mt-0.5 font-mono-tabular text-lg font-bold text-rose-300">
                             {stats.explosions}
                           </div>
                         </div>
                         <div className="p-2.5">
-                          <div className="text-[10.5px] text-slate-400">Живучесть</div>
-                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-amber-300">
-                            {buildingsIntegrityPct}%
+                          <div className="text-[10.5px] text-slate-400">{t.defenseWave}</div>
+                          <div className="mt-0.5 font-mono-tabular text-lg font-bold text-sky-300">
+                            #{aiWaveNumber}
                           </div>
                         </div>
                       </div>
                     ) : (
                       <div className="grid grid-cols-2 border border-slate-800/90 rounded overflow-hidden bg-[#0A111C] divide-x divide-y divide-slate-800/80">
                         <div className="p-2.5">
-                          <div className="text-[10.5px] text-slate-400">Всего запусков</div>
+                          <div className="text-[10.5px] text-slate-400">{t.totalLaunches}</div>
                           <div className="mt-0.5 font-mono-tabular text-lg font-bold text-slate-100">
                             {stats.totalLaunches}
                           </div>
                         </div>
                         <div className="p-2.5">
-                          <div className="text-[10.5px] text-slate-400">Сбито в воздухе</div>
+                          <div className="text-[10.5px] text-slate-400">{t.shotDownInAir}</div>
                           <div className="mt-0.5 font-mono-tabular text-lg font-bold text-emerald-300">
                             {stats.intercepts}
                           </div>
                         </div>
                         <div className="p-2.5">
-                          <div className="text-[10.5px] text-slate-400">Прилётов / Взрывов</div>
+                          <div className="text-[10.5px] text-slate-400">{t.impactsExplosions}</div>
                           <div className="mt-0.5 font-mono-tabular text-lg font-bold text-rose-300">
                             {stats.explosions}
                           </div>
                         </div>
                         <div className="p-2.5">
-                          <div className="text-[10.5px] text-slate-400">Поражено ПУ и ППО</div>
+                          <div className="text-[10.5px] text-slate-400">{t.destroyedUnitsLabel}</div>
                           <div className="mt-0.5 font-mono-tabular text-lg font-bold text-sky-300">
                             {stats.destroyedByStrikes}
                           </div>
@@ -4684,20 +5394,20 @@ export default function App() {
                       <div className="flex items-center justify-between px-3 py-2 text-xs">
                         <span className="font-semibold text-slate-200 flex items-center gap-1.5">
                           <Radar className="h-3.5 w-3.5 text-sky-400" />
-                          <span>Обстановка на радарах</span>
+                          <span>{t.radarPicture}</span>
                         </span>
                         <strong className="font-mono-tabular text-sky-300">{stats.activeFlights}</strong>
                       </div>
                       <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                        <span className="text-slate-400">БПЛА</span>
+                        <span className="text-slate-400">{t.uavsWord}</span>
                         <span className="font-mono-tabular text-amber-300">{stats.activeDrones}</span>
                       </div>
                       <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                        <span className="text-slate-400">Ракеты и КАБ</span>
+                        <span className="text-slate-400">{t.missilesAndKabWord}</span>
                         <span className="font-mono-tabular text-rose-300">{stats.activeMissiles}</span>
                       </div>
                       <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                        <span className="text-slate-400">Авиация</span>
+                        <span className="text-slate-400">{t.aviationWord}</span>
                         <span className="font-mono-tabular text-slate-200">{stats.activeAircraft}</span>
                       </div>
                     </div>
@@ -4705,32 +5415,40 @@ export default function App() {
                     {/* Defense Infrastructure Status */}
                     <div className="border border-slate-800/90 rounded bg-[#0A111C] divide-y divide-slate-800/80">
                       <div className="flex items-center justify-between px-3 py-2 text-xs">
-                        <span className="text-slate-400">Объекты в строю</span>
+                        <span className="text-slate-400">{t.objectsInOrder}</span>
                         <strong className="font-mono-tabular text-emerald-300">
                           {gameMode === 'ai'
-                            ? `${buildings.length}/${INITIAL_AI_BUILDINGS.length} (${buildingsIntegrityPct}%)`
-                            : `${buildings.length} (${buildingsIntegrityPct}%)`}
+                            ? `${playerBuildings.length}/${INITIAL_AI_BUILDINGS.length} (${buildingsIntegrityPct}%)`
+                            : `${playerBuildings.length} (${buildingsIntegrityPct}%)`}
                         </strong>
                       </div>
+                      {gameMode === 'ai' && (
+                        <div className="flex items-center justify-between px-3 py-1.5 text-xs">
+                          <span className="text-slate-400">{t.enemyObjectsShort}</span>
+                          <strong className="font-mono-tabular text-rose-300">
+                            {aiEnemyBuildings.length}/{INITIAL_AI_ENEMY_BUILDINGS.length}
+                          </strong>
+                        </div>
+                      )}
                       <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                        <span className="text-slate-400">Средства ППО и РЛС</span>
+                        <span className="text-slate-400">{t.pvoAndRadars}</span>
                         <span className="font-mono-tabular text-emerald-300">
                           {airDefenses.length}
                           {(damagedPvosCount > 0 || lowAmmoPvosCount > 0) && (
                             <span className="text-amber-300">
-                              {' '}({damagedPvosCount > 0 ? `${damagedPvosCount} повр.` : ''}{damagedPvosCount > 0 && lowAmmoPvosCount > 0 ? ' · ' : ''}{lowAmmoPvosCount > 0 ? `${lowAmmoPvosCount} б/к` : ''})
+                              {' '}({damagedPvosCount > 0 ? `${damagedPvosCount} ${t.damagedShort}` : ''}{damagedPvosCount > 0 && lowAmmoPvosCount > 0 ? ' · ' : ''}{lowAmmoPvosCount > 0 ? `${lowAmmoPvosCount} ${t.noAmmoShort}` : ''})
                             </span>
                           )}
                         </span>
                       </div>
                       {gameMode === 'ai' && (
                         <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                          <span className="text-slate-400">Доход от объектов</span>
-                          <span className="font-mono-tabular text-amber-300">+${aiIncomePerSec}/с</span>
+                          <span className="text-slate-400">{t.incomeFromObjects}</span>
+                          <span className="font-mono-tabular text-amber-300">+${aiIncomePerSec}{t.perSecShort}</span>
                         </div>
                       )}
                       <div className="flex items-center justify-between px-3 py-1.5 text-xs">
-                        <span className="text-slate-400">Тревоги (БПЛА / Ракеты)</span>
+                        <span className="text-slate-400">{t.alertsDroneMissile}</span>
                         <span className="font-mono-tabular text-slate-200">
                           <span className="text-yellow-300">{stats.droneAlertRaions}</span>
                           {' / '}
@@ -4746,11 +5464,11 @@ export default function App() {
                       <div className="flex items-center gap-1 min-w-0 overflow-x-auto">
                         {(
                           [
-                            { id: 'all', label: 'Все' },
-                            { id: 'intercept', label: 'Сбития' },
-                            { id: 'impact', label: 'Прилёты' },
-                            { id: 'miss', label: 'Промахи' },
-                            ...(gameMode === 'sandbox' ? [{ id: 'launch' as const, label: 'Пуски' }] : []),
+                            { id: 'all', label: t.filterAll },
+                            { id: 'intercept', label: t.filterIntercepts },
+                            { id: 'impact', label: t.filterImpacts },
+                            { id: 'miss', label: t.filterMisses },
+                            { id: 'launch', label: t.filterLaunches },
                           ] as Array<{ id: JournalFilter; label: string }>
                         ).map((f) => (
                           <button
@@ -4777,7 +5495,7 @@ export default function App() {
                           onClick={() => setEventLog([])}
                           className="rounded-xs border border-slate-800 bg-[#0E1726] hover:border-slate-700 px-2 py-1 text-[10.5px] font-medium text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          Очистить
+                          {t.clearBtn}
                         </button>
                       )}
                     </div>
@@ -4785,32 +5503,32 @@ export default function App() {
                     <div className="tac-scroll flex-1 overflow-y-auto">
                       {visibleJournalEntries.length === 0 ? (
                         <p className="p-4 text-xs text-slate-500 leading-relaxed">
-                          Дежурный журнал чист — перехваты ППО, промахи и зафиксированные удары появятся здесь в реальном времени.
+                          {t.journalEmpty}
                         </p>
                       ) : (
                         <div className="divide-y divide-slate-800/80">
                           {visibleJournalEntries.map((ev) => {
-                            const spec = MUNITION_BY_ID[ev.munitionId];
+                            const spec = getMunitionLocalized(ev.munitionId, lang);
                             const timeStr = formatSimTimeShort(ev.simTimeMinutes);
 
                             const meta =
                               ev.kind === 'intercept'
                                 ? {
-                                    tag: 'СБИТО',
+                                    tag: t.tagIntercept,
                                     tagClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35',
                                   }
                                 : ev.kind === 'miss'
                                   ? {
-                                      tag: 'ПРОМАХ',
+                                      tag: t.tagMiss,
                                       tagClass: 'bg-amber-500/15 text-amber-300 border-amber-500/35',
                                     }
                                   : ev.kind === 'impact'
                                     ? {
-                                        tag: 'ПРИЛЁТ',
+                                        tag: t.tagImpact,
                                         tagClass: 'bg-rose-500/15 text-rose-300 border-rose-500/35',
                                       }
                                     : {
-                                        tag: 'ПУСК',
+                                        tag: t.tagLaunch,
                                         tagClass: 'bg-sky-500/15 text-sky-300 border-sky-500/35',
                                       };
 
@@ -4866,7 +5584,7 @@ export default function App() {
                       soundFx.playUiClick('back');
                       setTelegramOpen(false);
                     }}
-                    aria-label="Закрыть телефон"
+                    aria-label={t.cancelBtn}
                     className="ml-1 flex h-5 w-5 items-center justify-center rounded border border-slate-700 bg-[#17212B] hover:border-slate-500 text-slate-300 cursor-pointer"
                   >
                     <X className="h-3 w-3" />
@@ -4888,14 +5606,14 @@ export default function App() {
                       {formatSimTimeShort(simTimeMinutes)}
                     </div>
                     <div className="mt-1 text-[11px] font-mono-tabular text-sky-300/90">
-                      {formatSimDateShort(simTimeMinutes)}
+                      {formatSimDateShort(simTimeMinutes, lang)}
                     </div>
                     <div className="mt-0.5 text-xs text-slate-400">
                       {stats.missileAlertRaions > 0
-                        ? `Ракетная угроза · ${stats.missileAlertRaions} р-н`
+                        ? t.tgMissileThreat(stats.missileAlertRaions)
                         : stats.droneAlertRaions > 0
-                          ? `Угроза БПЛА · ${stats.droneAlertRaions} р-н`
-                          : 'Экран смартфона · Мониторинг'}
+                          ? t.tgDroneThreat(stats.droneAlertRaions)
+                          : t.tgHomeTitle}
                     </div>
                   </div>
 
@@ -4933,7 +5651,7 @@ export default function App() {
                       <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-700 bg-[#17212B] group-hover:border-slate-500 text-sky-400 transition-colors">
                         <Radar className="h-7 w-7" />
                       </div>
-                      <span className="text-[11px] font-medium text-slate-200">Сводка ПВО</span>
+                      <span className="text-[11px] font-medium text-slate-200">{t.tgPvoSummaryBtn}</span>
                     </button>
 
                     <button
@@ -4948,12 +5666,12 @@ export default function App() {
                       <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-700 bg-[#17212B] group-hover:border-slate-500 text-amber-400 transition-colors">
                         <BellRing className="h-7 w-7" />
                       </div>
-                      <span className="text-[11px] font-medium text-slate-200">Каналы</span>
+                      <span className="text-[11px] font-medium text-slate-200">{t.tgChannelsBtn}</span>
                     </button>
                   </div>
 
                   <div className="text-center text-[10px] text-slate-500">
-                    Нажмите на Telegram для чтения каналов областей
+                    {t.tgHomeHint}
                   </div>
                 </div>
               ) : selectedTelegramOblast && activeTelegramChannel ? (
@@ -4968,7 +5686,7 @@ export default function App() {
                           soundFx.playUiClick('back');
                           setSelectedTelegramOblast(null);
                         }}
-                        aria-label="Назад к чатам"
+                        aria-label={t.back}
                         className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-[#232E3C] text-slate-200 shrink-0 cursor-pointer"
                       >
                         <ArrowLeft className="h-4 w-4" />
@@ -4992,7 +5710,7 @@ export default function App() {
                           </svg>
                         </div>
                         <div className="truncate text-[10px] text-slate-400">
-                          {activeTelegramChannel.subscribersLabel} подписчиков · {activeTelegramChannel.handle}
+                          {activeTelegramChannel.subscribersLabel} {t.tgSubscribers} · {activeTelegramChannel.handle}
                         </div>
                       </div>
                     </div>
@@ -5007,7 +5725,7 @@ export default function App() {
                         }
                         className="rounded px-2 py-1 text-[10px] font-medium text-slate-400 hover:text-slate-200 hover:bg-[#232E3C] whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Очистить
+                        {t.clearBtn}
                       </button>
                     )}
                   </div>
@@ -5024,7 +5742,7 @@ export default function App() {
                   >
                     {activeTelegramMessages.length === 0 ? (
                       <div className="mx-auto mt-6 max-w-[240px] rounded-lg bg-[#182533] px-3.5 py-3 text-center text-[11px] text-slate-300">
-                        Сообщений пока нет. Когда «Шахед» или ракета войдут в область, канал сразу опубликует курс.
+                        {t.tgNoMessages}
                       </div>
                     ) : (
                       activeTelegramMessages.map((post) => (
@@ -5049,7 +5767,7 @@ export default function App() {
                             <div className="flex items-center justify-between gap-2 pt-0.5 text-[10px] text-slate-400">
                               {post.eventKind === 'alert_off' ? (
                                 <span className="truncate font-semibold text-emerald-300">
-                                  Отбой тревоги
+                                  {t.tgAlertOff}
                                 </span>
                               ) : post.eventKind === 'alert_on' || post.eventKind === 'alert_upgrade' ? (
                                 <span
@@ -5060,41 +5778,41 @@ export default function App() {
                                   }`}
                                 >
                                   {post.alertSubtype === 'ballistic'
-                                    ? 'Тревога: Баллистика'
+                                    ? t.tgAlertBallistic
                                     : post.alertSubtype === 'aircraft'
-                                      ? 'Тревога: Ракетоноситель'
+                                      ? t.tgAlertAircraft
                                       : post.alertSubtype === 'missile'
-                                        ? 'Тревога: Ракетная'
-                                        : 'Тревога: Угроза БПЛА'}
+                                        ? t.tgAlertMissile
+                                        : t.tgAlertDrone}
                                 </span>
                               ) : post.eventKind === 'intercepted' ? (
                                 <span className="truncate font-semibold text-emerald-300">
-                                  {activeTelegramChannel.country === 'RU' ? 'Сбито ПВО' : 'Сбито ППО'}:{' '}
+                                  {activeTelegramChannel.country === 'RU' ? t.tgShotDownRu : t.tgShotDownUa}:{' '}
                                   {post.nearCity ?? post.raionName ?? post.oblast}
                                 </span>
                               ) : post.eventKind === 'dorozvedka' ? (
                                 <span className="truncate font-semibold text-sky-300">
-                                  Дорозведка: {formatOblastShortLabel(post.oblast)}
+                                  {t.tgDorozvedka}: {formatOblastShortLabel(post.oblast)}
                                 </span>
                               ) : post.eventKind === 'explosion' ? (
                                 <span className="truncate font-semibold text-orange-300">
-                                  Взрыв: {post.nearCity ?? post.raionName ?? post.oblast}
+                                  {t.tgExplosion}: {post.nearCity ?? post.raionName ?? post.oblast}
                                 </span>
                               ) : post.targetCity ? (
                                 <span className="truncate font-semibold text-rose-300">
-                                  На цель: {post.targetCity}
+                                  {t.tgOnTarget}: {post.targetCity}
                                 </span>
                               ) : post.transitOblast ? (
                                 <span className="truncate text-sky-300">
-                                  Транзит → <strong>{formatOblastShortLabel(post.transitOblast)}</strong>
+                                  {t.tgTransit} → <strong>{formatOblastShortLabel(post.transitOblast)}</strong>
                                 </span>
                               ) : (
                                 <span className="truncate text-slate-300">
-                                  Курс:{' '}
+                                  {t.tgCourse}:{' '}
                                   <strong>
                                     {post.bearingDeg !== undefined
-                                      ? `на ${computeCompassDirectionRu(post.bearingDeg)}`
-                                      : post.raionName ?? 'в области'}
+                                      ? computeCompassDirectionRu(post.bearingDeg)
+                                      : post.raionName ?? t.tgInOblast}
                                   </strong>
                                 </span>
                               )}
@@ -5115,7 +5833,7 @@ export default function App() {
 
                   {/* Authentic Telegram Channel Muted Bottom Bar */}
                   <div className="flex items-center justify-center border-t border-[#1E2C3A] bg-[#17212B] py-2 text-[11px] font-medium text-[#64B5F6] shrink-0">
-                    Канал мониторинга · сообщения обновляются автоматически
+                    {t.tgMonitoringFooter}
                   </div>
                 </div>
               ) : (
@@ -5138,7 +5856,7 @@ export default function App() {
                           onClick={() => setTelegramUnreadByOblast({})}
                           className="rounded px-2 py-1 text-[10px] font-medium text-[#64B5F6] hover:bg-[#232E3C] whitespace-nowrap shrink-0 cursor-pointer"
                         >
-                          Прочитать все
+                          {t.tgReadAll}
                         </button>
                       )}
                     </div>
@@ -5156,7 +5874,7 @@ export default function App() {
                             : 'text-slate-300 hover:text-white'
                         }`}
                       >
-                        <span>Украина</span>
+                        <span>{t.tgUkraine}</span>
                         {telegramUnreadUa > 0 && (
                           <span
                             className={`rounded px-1 font-mono-tabular text-[9.5px] font-bold ${
@@ -5181,7 +5899,7 @@ export default function App() {
                             : 'text-slate-300 hover:text-white'
                         }`}
                       >
-                        <span>Россия</span>
+                        <span>{t.tgRussia}</span>
                         {telegramUnreadRu > 0 && (
                           <span
                             className={`rounded px-1 font-mono-tabular text-[9.5px] font-bold ${
@@ -5204,8 +5922,8 @@ export default function App() {
                         onChange={(e) => setTelegramSearch(e.target.value)}
                         placeholder={
                           telegramCountryFilter === 'RU'
-                            ? 'Поиск каналов РФ...'
-                            : 'Поиск каналов Украины...'
+                            ? t.tgSearchRu
+                            : t.tgSearchUa
                         }
                         className="w-full rounded-lg bg-[#242F3D] pl-8 pr-2.5 py-1.5 text-[11px] text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#24A1DE]"
                       />
@@ -5249,7 +5967,7 @@ export default function App() {
                                   lastPost ? 'text-slate-300' : 'text-slate-500'
                                 }`}
                               >
-                                {lastPost ? lastPost.text : `${ch.oblast} · тихо`}
+                                {lastPost ? lastPost.text : `${ch.oblast} · ${t.tgQuiet}`}
                               </span>
                               {unread > 0 && (
                                 <span className="flex h-4 min-w-4 items-center justify-center rounded-md bg-[#2AABEE] px-1 font-mono-tabular text-[10px] font-bold text-slate-950 shrink-0">
@@ -5273,7 +5991,7 @@ export default function App() {
                     soundFx.playUiClick('tap');
                     setPhoneScreen((s) => (s === 'home' ? 'telegram' : 'home'));
                   }}
-                  title={phoneScreen === 'home' ? 'Открыть Telegram' : 'На рабочий стол телефона'}
+                  title={phoneScreen === 'home' ? 'Telegram' : t.tgHomeTitle}
                   className="h-1 w-20 rounded-full bg-slate-500 hover:bg-slate-300 transition-colors cursor-pointer"
                 />
               </div>
@@ -5289,20 +6007,38 @@ export default function App() {
             </div>
           )}
 
-          {/* Game Over Modal (AI Defense Mode) */}
+          {/* Game Over / Victory Modal (AI Mode) */}
           {gameScreen === 'gameover' && (
             <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/75 p-4">
-              <div className="w-full max-w-md rounded border border-red-500/50 bg-[#0A111C] overflow-hidden">
+              <div
+                className={`w-full max-w-md rounded border bg-[#0A111C] overflow-hidden ${
+                  aiOutcome === 'victory' ? 'border-emerald-500/55' : 'border-red-500/50'
+                }`}
+              >
                 <div className="flex items-center gap-3 border-b border-slate-800 px-5 py-4 bg-[#080D16]">
-                  <div className="flex h-10 w-10 items-center justify-center rounded border border-red-500/45 bg-red-500/15 text-red-300 shrink-0">
-                    <ShieldAlert className="h-5 w-5" />
+                  <div
+                    className={`flex h-10 w-10 items-center justify-center rounded border shrink-0 ${
+                      aiOutcome === 'victory'
+                        ? 'border-emerald-500/45 bg-emerald-500/15 text-emerald-300'
+                        : 'border-red-500/45 bg-red-500/15 text-red-300'
+                    }`}
+                  >
+                    {aiOutcome === 'victory' ? (
+                      <Shield className="h-5 w-5" />
+                    ) : (
+                      <ShieldAlert className="h-5 w-5" />
+                    )}
                   </div>
                   <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-red-400">
-                      Оборона прорвана
+                    <div
+                      className={`text-[11px] font-semibold uppercase tracking-wider ${
+                        aiOutcome === 'victory' ? 'text-emerald-400' : 'text-red-400'
+                      }`}
+                    >
+                      {aiOutcome === 'victory' ? t.victorySubtitle : t.defeatSubtitle}
                     </div>
                     <h2 className="font-display text-xl font-bold text-white">
-                      Все объекты уничтожены
+                      {aiOutcome === 'victory' ? t.victoryTitle : t.defeatTitle}
                     </h2>
                   </div>
                 </div>
@@ -5310,33 +6046,33 @@ export default function App() {
                 <div className="p-5 space-y-4">
                   <div className="grid grid-cols-2 border border-slate-800 rounded overflow-hidden bg-[#080D16] divide-x divide-y divide-slate-800 text-center">
                     <div className="p-3">
-                      <div className="text-[11px] text-slate-400">Отражено волн</div>
+                      <div className="text-[11px] text-slate-400">{t.wavesRepelled}</div>
                       <div className="mt-0.5 font-mono-tabular text-lg font-bold text-sky-300">
                         {aiWaveNumber}
                       </div>
                     </div>
                     <div className="p-3">
-                      <div className="text-[11px] text-slate-400">Сбито ППО</div>
+                      <div className="text-[11px] text-slate-400">{t.shotDownPvo}</div>
                       <div className="mt-0.5 font-mono-tabular text-lg font-bold text-emerald-300">
                         {stats.intercepts}
                       </div>
                     </div>
                     <div className="p-3">
-                      <div className="text-[11px] text-slate-400">Точность ППО</div>
+                      <div className="text-[11px] text-slate-400">{t.pvoAccuracy}</div>
                       <div className="mt-0.5 font-mono-tabular text-lg font-bold text-slate-100">
                         {interceptAccuracyPct}%
                       </div>
                     </div>
                     <div className="p-3">
-                      <div className="text-[11px] text-slate-400">Игровое время</div>
+                      <div className="text-[11px] text-slate-400">{t.simTimeLabel}</div>
                       <div className="mt-0.5 font-mono-tabular text-sm font-bold text-amber-300">
-                        {formatSimClock(simTimeMinutes)}
+                        {formatSimClock(simTimeMinutes, lang)}
                       </div>
                     </div>
                   </div>
 
                   <div className="text-center text-[11px] font-mono-tabular text-slate-400">
-                    Реальное время обороны: {Math.floor(aiSurvivedSec)} с · Пропущено ударов: {stats.explosions}
+                    {t.realTimeDefense(Math.floor(aiSurvivedSec), stats.explosions)}
                   </div>
 
                   <div className="grid grid-cols-2 gap-2.5">
@@ -5346,14 +6082,14 @@ export default function App() {
                       className="flex items-center justify-center gap-2 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 transition-colors cursor-pointer"
                     >
                       <RotateCcw className="h-4 w-4" />
-                      <span>Играть снова</span>
+                      <span>{t.playAgainBtn}</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleRequestReturnToMenu}
                       className="flex items-center justify-center gap-2 rounded border border-slate-700 bg-[#0E1726] hover:border-slate-600 text-slate-200 font-semibold text-sm py-2.5 transition-colors cursor-pointer"
                     >
-                      <span>В меню</span>
+                      <span>{t.toMenuBtn}</span>
                     </button>
                   </div>
                 </div>
